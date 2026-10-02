@@ -26,9 +26,27 @@ ClearSword 源码里保留了作者自己的注释与 `NOTE` 标记。上游仓�
    `pmap_from_task`）。它们依赖 `thread_t_tro`，而这个 offset 是**按机型不同**的
    （ClearSword 硬编码 0x378，A14 上应为 0x388 一类），值不对就会拿垃圾地址去读，
    直接卡死。我们改用自己的、带 `getpid()` 自校验的扫描（见 `Sources/Core/DSEscape.m`）。
-3. **新增 `Sources/Core/DSEscape.{h,m}`**：沙盒扩展改写 + root 凭据改写。
-   和上游 FilzaJailedDS 的 `sandbox_escape.m` 同一套链路常量，但每一步读之前都先验地址合法性，
-   并且 `thread_t_tro` 靠运行时扫描 + `p_pid == getpid()` 反向校验得到，不依赖版本表。
+3. **新增 `Sources/Core/DSEscape.{h,m}`**：沙盒扩展改写 + 凭据（cred）定位与提权。
+   - 链路常量直接采用 [rooootdev/lara](https://github.com/rooootdev/lara) 的 `lara/kexploit/pe/sbx.m`：
+     `cr_label = 0x78`、`label → sandbox = 0x10`、`sandbox → ext_set = 0x10`、`ext.data = 0x40`、`ext.data_len = 0x48`；
+     改写的三步（patch ext → 改读写类别 → 补空 hash 槽）也照它的 `patchext` / `setrwclass` 写。
+   - **指针还原同样照抄 lara**：`S(x) = xpaci(x); signptr(v)`，即先用 XPACI 剥掉 PAC 签名，
+     再按需补内核高位。实测（iPhone13,4 / iOS 18.5）`cred+0x78` 存的是 `0xfe988be09fe407c0`，
+     只有剥掉签名才能得到真正的 label 地址。
+   - 凭据定位用「两个 socket 的 `so_cred` 必然指向同一对象」+ `cr_uid == getuid()` 复核；
+     这比 lara 的 `procbysock*` 更省事（本机 `so_background_thread` 恒为 0，那条路走不通）。
+   - **刻意不做任何扫描**：早期版本为了「找不到就试别的」写了 offset 笛卡尔积 + 内存扫描，
+     实测会把内核打崩（设备重启）。现在整条链路是单路、固定 offset、只做值变换不做猜测；
+     任何一跳不成立就干净失败并把关键值写进日志。
+
+## 致谢（这一版的关键参考）
+
+| 内容 | 来源 |
+| --- | --- |
+| 沙盒逃逸链路与写法 | [rooootdev/lara](https://github.com/rooootdev/lara) `lara/kexploit/pe/sbx.m` |
+| `S(x) = xpaci(x); signptr(v)` 指针还原 | 同上（另见 `lara/kexploit/utils.m`） |
+| 内核读写（race / OOB / krw） | [TheRealClarity/ClearSword](https://github.com/TheRealClarity/ClearSword) |
+| 按版本/机型分档的 offset 表（供对照） | [34306/FilzaJailedDS](https://github.com/34306/FilzaJailedDS) `kexploit/offsets.m`、lara `kexploit/offsets.m` |
 
 ## 为什么换掉上一版后端
 
