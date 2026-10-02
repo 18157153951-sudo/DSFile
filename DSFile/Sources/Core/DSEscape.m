@@ -540,10 +540,15 @@ static uint64_t ds_discover_identities_v2(void)
 
 #pragma mark - 身份发现 v3（零风险：只比较，不猜）
 
-/// 内核堆区间（zone）。内核静态段是 0xfffffff0…，两者不重叠。
+/// 内核对象地址判据。
+///
+/// 早先这里写的是「堆区间 0xffffffe0…0xfffffff0」，结果在 18:58 那次运行里把**正确的 cred**
+/// 挡掉了：那次内核 zone 被映射在 0xffffffde…（低于 0xffffffe0），于是「两个 socket 指向同一
+/// 对象」这条规则命中了却过不了区间检查。现在改用 lara 的判据（`0xffff` 前缀即可），
+/// 与 lara `is_kptr` 完全一致。
 static inline bool ds_is_heap_pointer(uint64_t address)
 {
-    return address >= 0xffffffe000000000ULL && address < 0xfffffff000000000ULL;
+    return ds_is_kptr(address);
 }
 
 /// 收集几个「确定是 socket」的对象地址：
