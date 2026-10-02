@@ -1,0 +1,75 @@
+name: Build Filza Tweak
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'FilzaTweak/**'
+      - '.github/workflows/build-filza-tweak.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        working-directory: FilzaTweak
+        run: xcodegen generate
+
+      - name: 编译 dylib（不签名）
+        working-directory: FilzaTweak
+        run: |
+          xcodebuild build \
+            -project FilzaTweak.xcodeproj \
+            -target FilzaApplySandboxExt \
+            -configuration Release \
+            -sdk iphoneos \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            COPY_PHASE_STRIP=NO \
+            STRIP_INSTALLED_PRODUCT=NO
+
+      - name: 确认关键符号在产物里
+        working-directory: FilzaTweak
+        run: |
+          DYLIB=build/Release-iphoneos/FilzaApplySandboxExt.dylib
+          ls -lh "$DYLIB"
+          for SYMBOL in _kexploit_opa334 _sandbox_escape _xpf_start_with_kernel_path _TweakInit; do
+            if nm -gU "$DYLIB" 2>/dev/null | grep -q " $SYMBOL\$"; then
+              echo "✅ 找到 $SYMBOL"
+            else
+              echo "❌ 缺少 $SYMBOL"
+              nm -gU "$DYLIB" 2>/dev/null | head -50
+              exit 1
+            fi
+          done
+          echo "== 架构 =="
+          lipo -info "$DYLIB"
+          echo "== 依赖 =="
+          otool -L "$DYLIB"
+
+      - name: 计算校验值并打包
+        working-directory: FilzaTweak
+        run: |
+          DYLIB=build/Release-iphoneos/FilzaApplySandboxExt.dylib
+          echo "SHA256: $(shasum -a 256 "$DYLIB" | awk '{print $1}')"
+          mkdir -p out
+          cp "$DYLIB" out/FilzaApplySandboxExt.dylib
+
+      - name: 上传 dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: FilzaTweak-dylib
+          path: FilzaTweak/out/FilzaApplySandboxExt.dylib
+          if-no-files-found: error
+          retention-days: 30

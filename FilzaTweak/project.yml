@@ -1,0 +1,69 @@
+name: FilzaTweak
+options:
+  bundleIdPrefix: com.dsfile
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  FilzaApplySandboxExt:
+    # FilzaJailedDS 原本是 Theos tweak；这里用 XcodeGen 编成等价的动态库（dylib），
+    # 供 eSign / Sideloadly 注入到真正的 Filza IPA 里。
+    type: library.dynamic
+    platform: iOS
+    sources:
+      # 文件清单严格照上游 Makefile（FilzaApplySandboxExt_FILES）
+      - path: Tweak.m
+      - path: sandbox_escape.m
+      - path: apfs_own.m
+      - path: kexploit
+      - path: kpf
+      - path: utils
+      - path: XPF/src
+      - path: XPF/external/ChOma/src
+    settings:
+      base:
+        PRODUCT_NAME: FilzaApplySandboxExt
+        PRODUCT_BUNDLE_IDENTIFIER: com.dsfile.filzaapplysandboxext
+        # 注入用不签名产物，签名交给 eSign / Sideloadly
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        ARCHS: arm64
+        ONLY_ACTIVE_ARCH: NO
+        GENERATE_INFOPLIST_FILE: YES
+        # Theos tweak 默认 ARC
+        CLANG_ENABLE_OBJC_ARC: YES
+        CLANG_ENABLE_MODULES: YES
+        GCC_C_LANGUAGE_STANDARD: gnu11
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)
+          - $(SRCROOT)/XPF/src
+          - $(SRCROOT)/XPF/external/ChOma/include
+          - $(SRCROOT)/XPF/external/ChOma/src
+        OTHER_CFLAGS:
+          - -I$(SRCROOT)
+          - -I$(SRCROOT)/XPF/src
+          - -I$(SRCROOT)/XPF/external/ChOma/include
+          - -Wno-unused-function
+          - -Wno-unused-variable
+          - -Wno-unused-but-set-variable
+          - -Wno-incompatible-pointer-types
+          - -Wno-incompatible-pointer-types-discards-qualifiers
+          - -Wno-deprecated-declarations
+          - -Wno-nonportable-include-path
+          - -Wno-format
+        OTHER_LDFLAGS:
+          - -framework
+          - UIKit
+          - -framework
+          - Foundation
+          - -framework
+          - IOKit
+          - -framework
+          - CoreFoundation
+          # 私有框架（SDK 里有 .tbd，可直接链接）
+          - -framework
+          - IOSurface
+          - -lz
+          - -lsandbox
