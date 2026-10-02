@@ -104,7 +104,7 @@ PFXrefMetric *pfmetric_xref_init(uint64_t target, uint32_t xrefType)
     return NULL;
 }
 
-void pfmetric_run(PFSection *section, PFMetric *metric, bool (^callback)(uint64_t vmaddr, bool *stop))
+void pfmetric_run(PFSection *section, PFMetric *metric, void (^callback)(uint64_t vmaddr, bool *stop))
 {
     (void)section; (void)metric; (void)callback;
 }

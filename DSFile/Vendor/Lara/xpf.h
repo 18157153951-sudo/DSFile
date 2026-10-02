@@ -34,7 +34,7 @@ typedef struct s_PFSection PFSection;
 
 PFStringMetric *pfmetric_string_init(const char *string);
 PFXrefMetric *pfmetric_xref_init(uint64_t target, uint32_t xrefType);
-void pfmetric_run(PFSection *section, PFMetric *metric, bool (^callback)(uint64_t vmaddr, bool *stop));
+void pfmetric_run(PFSection *section, PFMetric *metric, void (^callback)(uint64_t vmaddr, bool *stop));
 void pfmetric_free(PFMetric *metric);
 bool pfsec_contains_vmaddr(PFSection *section, uint64_t vmaddr);
 uint64_t pfsec_arm64_resolve_adrp_ldr_str_add_reference_auto(PFSection *section, uint64_t adrpAddr);
