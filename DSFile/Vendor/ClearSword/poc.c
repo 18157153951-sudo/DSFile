@@ -233,8 +233,10 @@ kern_return_t pe_v1(void) {
 
     // DSFile 补丁：上游在这里无论成败都 return KERN_SUCCESS，于是失败后会拿无效的
     // rw_socket_pcb 继续读内核（krw.c 里是 while(1) 卡死）。这里如实返回失败。
-    if (!success) {
-        LOG_ERR("DSFile: race failed, no corrupted socket found");
+    // 注意 `success` 是循环体里的局部变量，循环外不可见，所以用 rw_socket_pcb 判定
+    // —— 它只在 find_and_corrupt_socket 成功时才会被赋值。
+    if ((g_ctx.rw_socket_pcb & 0xfffff00000000000ULL) != 0xfffff00000000000ULL) {
+        LOG_ERR("DSFile: race failed, rw_socket_pcb = %#llx", g_ctx.rw_socket_pcb);
         return KERN_FAILURE;
     }
     return KERN_SUCCESS;
