@@ -23,8 +23,10 @@
 #import <dlfcn.h>
 
 #import "darksword.h"     // lara: ds_run / ds_is_ready / ds_kread* / kernel_base
-#import "utils.h"         // lara: ourproc / procbypid / 进程辅助
+#import "utils.h"         // lara: ourproc / procbypid / init_offsets
 #import "sbx.h"           // lara: sbx_escape 沙盒逃逸
+#import "offsets.h"       // lara: offsets_init()（按版本/机型填 off_* 全局量）
+#import "DSEscape.h"      // 回退路线：cred 定位 + lara 的 offsets/S() 链路
 #import "machine_info.h"  // CPU 家族宏（随 lara 目录带过来的一份常量头）
 
 #pragma mark - 状态
@@ -321,6 +323,10 @@ static uint32_t ds_cpu_family(void)
 
             int kret = 1;
             @try {
+                // lara 的 off_* / PROC_PID_OFFSET 等全局量必须先由 init_offsets() / offsets_init() 填好，
+                // 否则 darksword 的漏洞代码会拿着 0 偏移去读写内核。
+                init_offsets();
+                offsets_init();
                 kret = ds_run();
             } @catch (NSException *e) {
                 if (log) log([NSString stringWithFormat:@"[DSFile] 漏洞抛出异常: %@", e.reason]);
@@ -402,7 +408,15 @@ static uint32_t ds_cpu_family(void)
 
     int sret = 1;
     @try {
-        sret = (selfProc != 0) ? sbx_escape(selfProc) : -3;
+        if (selfProc != 0) {
+            sret = sbx_escape(selfProc);
+        } else {
+            // lara 的 proc 恢复（procbysock*）依赖 so_background_thread，本机（18.5/A14）恒为 0，
+            // 大概率拿不到 proc；这时回退到我们自己的 cred 定位 + lara 的 offsets/S() 链路。
+            if (log) log(@"[DSFile] lara ds_get_our_proc() 返回 0，回退到内置 cred 定位 + 沙盒链路…");
+            gEscapeLogBridge = [log copy];
+            sret = DSEscapeSandbox(ds_escape_log_bridge);
+        }
     } @catch (NSException *e) {
         if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写异常: %@", e.reason]);
         sret = -9;
