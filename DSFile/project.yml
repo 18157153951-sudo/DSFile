@@ -12,7 +12,7 @@ targets:
     platform: iOS
     sources:
       - path: Sources
-      - path: Vendor/Escape
+      - path: Vendor/ClearSword
     info:
       path: Sources/Info.plist
       properties:
@@ -38,8 +38,8 @@ targets:
         PRODUCT_NAME: DSFile
         PRODUCT_BUNDLE_IDENTIFIER: com.dsfile.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "2"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         # 出的是未签名 IPA，签名交给 eSign / 证书重签，entitlements 保持干净
@@ -54,15 +54,15 @@ targets:
         # 逃逸代码与桥接层都按 ARC 写；显式打开，避免 xcodebuild 默认值差异
         CLANG_ENABLE_OBJC_ARC: YES
         GCC_C_LANGUAGE_STANDARD: gnu11
-        # 逃逸内核代码不在 SDK 公共头文件覆盖范围里，用 Vendor 里的兼容头
+        # 漏洞代码不在 SDK 公共头文件覆盖范围里，用 Vendor 里的兼容头
         # （只补 SDK 缺的 sys/fileport.h；IOSurface 直接用 SDK 里那份并链接之）
         HEADER_SEARCH_PATHS:
-          - $(SRCROOT)/Vendor/Escape/Shims
-          - $(SRCROOT)/Vendor/Escape
+          - $(SRCROOT)/Vendor/ClearSword/Shims
+          - $(SRCROOT)/Vendor/ClearSword
           - $(SRCROOT)/Sources/Core
         OTHER_CFLAGS:
-          - -I$(SRCROOT)/Vendor/Escape/Shims
-          - -I$(SRCROOT)/Vendor/Escape
+          - -I$(SRCROOT)/Vendor/ClearSword/Shims
+          - -I$(SRCROOT)/Vendor/ClearSword
           - -Wno-unused-function
           - -Wno-unused-variable
           - -Wno-unused-but-set-variable
@@ -70,6 +70,7 @@ targets:
           - -Wno-incompatible-pointer-types-discards-qualifiers
           - -Wno-deprecated-declarations
           - -Wno-format
+          - -Wno-implicit-function-declaration
           - -Wno-everything
         OTHER_LDFLAGS:
           - -framework

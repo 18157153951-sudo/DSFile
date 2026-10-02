@@ -62,6 +62,28 @@ final class KernelCenter: ObservableObject {
 
     private static let autoActivateKey = "DSFile.autoActivateKernel"
     private let queue = DispatchQueue(label: "com.dsfile.kernel", qos: .userInitiated)
+    private var watchdog: DispatchWorkItem?
+
+    // MARK: - 看门狗
+
+    /// 内核漏洞后端在异常路径上可能是死循环（不是返回错误），所以必须有个超时兜底，
+    /// 否则界面会永远停在「激活中」。
+    private func armWatchdog(seconds: Double) {
+        watchdog?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self, self.busy else { return }
+            self.busy = false
+            self.phase = .failed("激活超过 \(Int(seconds)) 秒没有结束：多半是漏洞卡在 race 里了。请从后台完全退出 App，重开后再试一次。")
+            DSLog.shared.error("激活超时（\(Int(seconds))s）：已视为失败并恢复界面（后台那个线程可能还卡着，重启 App 才会清掉）", source: "内核")
+        }
+        watchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
+    private func disarmWatchdog() {
+        watchdog?.cancel()
+        watchdog = nil
+    }
 
     private init() {
         let stored = UserDefaults.standard.object(forKey: KernelCenter.autoActivateKey) as? Bool
@@ -124,6 +146,7 @@ final class KernelCenter: ObservableObject {
                 self?.finish(result)
             }
         }
+        armWatchdog(seconds: 90)
     }
 
     /// 漏洞已成功、只补沙盒改写
@@ -158,6 +181,7 @@ final class KernelCenter: ObservableObject {
     }
 
     private func finish(_ result: DSKernelResult) {
+        disarmWatchdog()
         busy = false
         kernelBase = DSKernel.kernelBase()
         isRoot = DSKernel.isRunningAsRoot()

