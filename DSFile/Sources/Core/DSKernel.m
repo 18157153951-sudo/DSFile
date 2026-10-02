@@ -3,12 +3,15 @@
 //
 //  内核层：FilzaJailedDS 原版实现（上游 tag 2.2 / commit 49c3a90，逐字节零修改，见 FilzaTweak/NOTICE.md）
 //     漏洞  kexploit_opa334()
-//     逃逸  sandbox_escape(self_proc)
-//     提权  sandbox_elevate_to_root(self_proc)
+//     逃逸  DSCredEscapeSandbox()          ← 我们自己的 cred 路线
+//     提权  DSCredEscapeElevateToRoot()
 //
-//  调用顺序严格照 FilzaTweak/Tweak.m 的 runExploit()：
-//      kexploit_opa334() → proc_self() → sandbox_escape(self_proc)
-//  （Tweak.m 里其余部分是 Filza 专属 ObjC hook / zip hook，跟内核无关，故不搬。）
+//  **为什么不用上游的 sandbox_escape() / proc_self()**：
+//  上游 proc_self() 走 rw_pcb → inp_socket → socket + off_socket_so_background_thread → thread + thread_t_tro；
+//  本机（iPhone13,4 / iOS 18.5）实测 so_background_thread **恒为 0**，于是它把 0x378 当内核地址去读，
+//  撞进上游 FAILURE() 宏（sleep(2); exit(c)）→ App 直接退到桌面（真机日志已确认：漏洞跑通、逃逸入口即崩）。
+//  所以逃逸/提权改用另一条本机已验证 4/4 命中的路线（两个 socket 的 so_cred 一致 + cr_uid 校验），
+//  实现见 Sources/Core/DSCredEscape.m。上游 FilzaTweak/** 依旧零修改。
 //
 //  三条硬规则：
 //   1. 内核漏洞只在用户主动点「激活」时执行一次，同一进程内绝不重跑；
@@ -34,9 +37,8 @@
 // ===== 上游内核层（头文件路径由 project.yml 的 HEADER_SEARCH_PATHS 提供）=====
 #import "kexploit/kexploit_opa334.h"   // kexploit_opa334 / early_kread64 / SYSTEM_VERSION_* 宏
 #import "kexploit/krw.h"               // kread32 / is_kaddr_valid
-#import "kexploit/kutils.h"            // proc_self
 #import "kexploit/offsets.h"           // off_proc_p_pid 等
-#import "sandbox_escape.h"             // sandbox_escape / sandbox_elevate_to_root
+#import "DSCredEscape.h"               // cred 路线的逃逸 / 提权（不调用 proc_self / 上游 sandbox_escape）
 #import "patchfinder.h"                // init_xpf（保留上游 XPF 能力，见下）
 #import "machine_info.h"               // CPU 家族宏
 
@@ -96,8 +98,7 @@ static BOOL gExploitAttempted = NO;
 static BOOL gExploitDone    = NO;
 static BOOL gEscaped        = NO;
 static NSError *gLastError  = nil;
-/// 上游 proc_self() 的结果缓存（逃逸与提权都要用同一个 self proc）
-static uint64_t dsSelfProcCache = 0;
+// 逃逸/提权不再需要 self proc：旧版缓存的上游 proc_self() 结果已弃用（本机必然野读 0x378 → exit）。
 
 #pragma mark - 日志桥
 
@@ -327,7 +328,7 @@ static uint32_t ds_cpu_family(void)
 + (NSString *)diagnosticsText
 {
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"后端: FilzaJailedDS 原版（kexploit_opa334 + sandbox_escape）\n"];
+    [text appendFormat:@"后端: FilzaJailedDS 原版漏洞（kexploit_opa334）+ 自研 cred 路线逃逸\n"];
     [text appendFormat:@"机型: %@\n", [self deviceModelIdentifier]];
     [text appendFormat:@"系统: %@\n", [self systemVersion]];
     [text appendFormat:@"芯片: %@\n", [self cpuFamilyName]];
@@ -341,7 +342,10 @@ static uint32_t ds_cpu_family(void)
     [text appendFormat:@"rw_socket_pcb: 0x%llx / control_socket_pcb: 0x%llx\n",
         (unsigned long long)rwSocketPcb, (unsigned long long)controlSocketPcb];
     [text appendFormat:@"socket fd: rw=%d control=%d\n", rwSocket, controlSocket];
-    [text appendFormat:@"self proc: 0x%llx\n", (unsigned long long)dsSelfProcCache];
+    [text appendFormat:@"cred: 0x%llx / label: 0x%llx\n",
+        DSCredEscapeLastCred(), DSCredEscapeLastLabel()];
+    [text appendFormat:@"sandbox: 0x%llx / ext_set: 0x%llx\n",
+        DSCredEscapeLastSandbox(), DSCredEscapeLastExtSet()];
     [text appendFormat:@"现场探针写盘: %@\n", ds_probe_write_access() ? @"通过" : @"失败"];
     ds_maybe_init_xpf();   // 仅在设了 DSFILE_XPF 时才真的初始化 XPF；同时保证上游 XPF 不被链接器丢掉
     if (gLastError) [text appendFormat:@"上一次错误: %@\n", gLastError.localizedDescription];
@@ -449,7 +453,7 @@ static uint32_t ds_cpu_family(void)
 }
 
 /// 只做「沙盒改写 + 自检」这一步。
-/// 顺序照 FilzaJailedDS 的 Tweak.m：先 proc_self() 拿本进程 proc，再 sandbox_escape(proc)。
+/// 逃逸走 DSCredEscapeSandbox()（cred 路线）：不碰 proc_self()，也不调用上游 sandbox_escape()。
 + (DSKernelResult)ds_escapeStepWithLog:(DSKernelLogBlock)log
 {
     if (!ds_kernel_rw_healthy()) {
@@ -462,37 +466,22 @@ static uint32_t ds_cpu_family(void)
         return DSKernelResultExploitFailed;
     }
 
-    if (log) log(@"[DSFile] 开始改写本进程沙盒数据（上游 sandbox_escape）…");
+    if (log) log(@"[DSFile] 开始改写本进程沙盒数据（cred 路线：两个 socket 的 so_cred 一致 + cr_uid 校验）…");
+    ds_breadcrumb_write("[DSFile] 逃逸开始（cred 路线）\n");
 
-    uint64_t selfProc = dsSelfProcCache;
-    if (!selfProc) {
-        @try {
-            selfProc = proc_self();
-        } @catch (NSException *e) {
-            if (log) log([NSString stringWithFormat:@"[DSFile] proc_self 异常: %@", e.reason]);
-        }
-        dsSelfProcCache = selfProc;
-    }
-    ds_breadcrumb_write("[DSFile] proc_self() = 0x%llx\n", (unsigned long long)selfProc);
-
-    if (!selfProc) {
-        if (log) log(@"[DSFile] proc_self() 返回 0：拿不到本进程 proc，无法做沙盒改写");
-        ds_breadcrumb_write("[DSFile] proc_self() = 0，放弃逃逸\n");
-        gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultEscapeFailed
-                                     userInfo:@{ NSLocalizedDescriptionKey: @"proc_self() 返回 0，无法改写沙盒" }];
-        return DSKernelResultEscapeFailed;
-    }
-    if (log) log([NSString stringWithFormat:@"[DSFile] 本进程 proc = 0x%llx", (unsigned long long)selfProc]);
+    DSCredEscapeSetLogCallback(ds_escape_log_bridge);
 
     int sret = 1;
     @try {
-        sret = sandbox_escape(selfProc);
+        sret = DSCredEscapeSandbox();
     } @catch (NSException *e) {
         if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写异常: %@", e.reason]);
         sret = -9;
     }
-    ds_breadcrumb_write("[DSFile] sandbox_escape() 返回 %d\n", sret);
-    if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写返回 %d", sret]);
+    ds_breadcrumb_write("[DSFile] DSCredEscapeSandbox() 返回 %d（cred=0x%llx label=0x%llx ext_set=0x%llx）\n",
+                        sret, DSCredEscapeLastCred(), DSCredEscapeLastLabel(), DSCredEscapeLastExtSet());
+    if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写返回 %d（cred=0x%llx → ext_set=0x%llx）",
+                  sret, DSCredEscapeLastCred(), DSCredEscapeLastExtSet()]);
 
     if (ds_probe_write_access()) {
         gEscaped = YES;
@@ -514,26 +503,19 @@ static uint32_t ds_cpu_family(void)
         return DSKernelResultExploitFailed;
     }
 
-    if (log) log(@"[DSFile] 尝试把本进程凭据改成 root（上游 sandbox_elevate_to_root）…");
+    if (log) log(@"[DSFile] 尝试把本进程凭据改成 root（改写 ucred 里的 posix_cred）…");
+    ds_breadcrumb_write("[DSFile] 提权开始（cred 路线）\n");
 
-    uint64_t selfProc = dsSelfProcCache;
-    if (!selfProc) {
-        @try { selfProc = proc_self(); } @catch (NSException *e) { }
-        dsSelfProcCache = selfProc;
-    }
-    if (!selfProc) {
-        if (log) log(@"[DSFile] proc_self() 返回 0，无法提权");
-        return DSKernelResultExploitFailed;
-    }
+    DSCredEscapeSetLogCallback(ds_escape_log_bridge);
 
     int ret = -1;
     @try {
-        ret = sandbox_elevate_to_root(selfProc);
+        ret = DSCredEscapeElevateToRoot();
     } @catch (NSException *e) {
         if (log) log([NSString stringWithFormat:@"[DSFile] 提权异常: %@", e.reason]);
         ret = -1;
     }
-    ds_breadcrumb_write("[DSFile] sandbox_elevate_to_root() 返回 %d\n", ret);
+    ds_breadcrumb_write("[DSFile] DSCredEscapeElevateToRoot() 返回 %d\n", ret);
 
     if (getuid() == 0) {
         if (log) log(@"[DSFile] 提权成功，当前 uid=0");
