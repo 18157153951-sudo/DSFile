@@ -12,7 +12,16 @@ targets:
     platform: iOS
     sources:
       - path: Sources
-      - path: Vendor/ClearSword
+      # ===== 内核层：FilzaJailedDS 原版实现（漏洞 + 沙盒逃逸 + 提权）=====
+      # 源码与上游 tag 2.2（commit 49c3a90）逐字节一致，零修改（见 FilzaTweak/NOTICE.md）。
+      - path: ../FilzaTweak/kexploit
+      - path: ../FilzaTweak/kpf
+      - path: ../FilzaTweak/utils
+      - path: ../FilzaTweak/XPF
+      - path: ../FilzaTweak/sandbox_escape.m
+      - path: ../FilzaTweak/apfs_own.m
+      # 故意不包含 ../FilzaTweak/Tweak.m（那是给 Filza 用的 hook 层，App 里不需要）
+      # 旧后端 ClearSword / lara / DSEscape 留在仓库做对照与回退，不参与编译。
     info:
       path: Sources/Info.plist
       properties:
@@ -38,8 +47,8 @@ targets:
         PRODUCT_NAME: DSFile
         PRODUCT_BUNDLE_IDENTIFIER: com.dsfile.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "0.2.0"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "3"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         # 出的是未签名 IPA，签名交给 eSign / 证书重签，entitlements 保持干净
@@ -51,24 +60,30 @@ targets:
         ENABLE_BITCODE: NO
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Core/DSFile-Bridging-Header.h
         CLANG_ENABLE_MODULES: YES
-        # 逃逸代码与桥接层都按 ARC 写；显式打开，避免 xcodebuild 默认值差异
         CLANG_ENABLE_OBJC_ARC: YES
         GCC_C_LANGUAGE_STANDARD: gnu11
-        # 漏洞代码不在 SDK 公共头文件覆盖范围里，用 Vendor 里的兼容头
-        # （只补 SDK 缺的 sys/fileport.h；IOSurface 直接用 SDK 里那份并链接之）
         HEADER_SEARCH_PATHS:
-          - $(SRCROOT)/Vendor/ClearSword/Shims
-          - $(SRCROOT)/Vendor/ClearSword
+          - $(SRCROOT)/../FilzaTweak
+          - $(SRCROOT)/../FilzaTweak/kexploit
+          - $(SRCROOT)/../FilzaTweak/kpf
+          - $(SRCROOT)/../FilzaTweak/utils
+          - $(SRCROOT)/../FilzaTweak/XPF/src
+          - $(SRCROOT)/../FilzaTweak/XPF/external/ChOma/include
           - $(SRCROOT)/Sources/Core
         OTHER_CFLAGS:
-          - -I$(SRCROOT)/Vendor/ClearSword/Shims
-          - -I$(SRCROOT)/Vendor/ClearSword
+          - -I$(SRCROOT)/../FilzaTweak
+          - -I$(SRCROOT)/../FilzaTweak/kexploit
+          - -I$(SRCROOT)/../FilzaTweak/kpf
+          - -I$(SRCROOT)/../FilzaTweak/XPF/src
+          - -I$(SRCROOT)/../FilzaTweak/XPF/external/ChOma/include
+          # 照 FilzaTweak/Makefile 里那串
           - -Wno-unused-function
           - -Wno-unused-variable
           - -Wno-unused-but-set-variable
           - -Wno-incompatible-pointer-types
           - -Wno-incompatible-pointer-types-discards-qualifiers
           - -Wno-deprecated-declarations
+          - -Wno-nonportable-include-path
           - -Wno-format
           - -Wno-implicit-function-declaration
           - -Wno-everything
@@ -79,6 +94,10 @@ targets:
           - UIKit
           - -framework
           - CoreFoundation
-          # 内核漏洞要用 IOSurfaceCreate / IOSurfaceGetBaseAddress（SDK 里有这个私有框架）
+          - -framework
+          - IOKit
+          # 漏洞用 IOSurfaceCreate / IOSurfaceGetBaseAddress / IOSurfacePrefetchPages
           - -framework
           - IOSurface
+          - -lz
+          - -lsandbox
