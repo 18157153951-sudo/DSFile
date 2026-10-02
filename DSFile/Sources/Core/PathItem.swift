@@ -14,8 +14,8 @@ struct PathItem: Identifiable, Hashable {
     let size: Int64
     let modified: Date?
     let mode: UInt16
-    let uid: Int32
-    let gid: Int32
+    let uid: uid_t
+    let gid: gid_t
 
     var id: String { path }
 
@@ -112,10 +112,10 @@ struct PathItem: Identifiable, Hashable {
 
     // MARK: - POSIX 名字
 
-    private static var userNameCache: [Int32: String] = [:]
-    private static var groupNameCache: [Int32: String] = [:]
+    private static var userNameCache: [uid_t: String] = [:]
+    private static var groupNameCache: [gid_t: String] = [:]
 
-    static func userName(for uid: Int32) -> String {
+    static func userName(for uid: uid_t) -> String {
         if uid == 0 { return "root" }
         if uid == 501 { return "mobile" }
         if let cached = userNameCache[uid] { return cached }
@@ -127,7 +127,7 @@ struct PathItem: Identifiable, Hashable {
         return name
     }
 
-    static func groupName(for gid: Int32) -> String {
+    static func groupName(for gid: gid_t) -> String {
         if gid == 0 { return "wheel" }
         if gid == 501 { return "mobile" }
         if let cached = groupNameCache[gid] { return cached }
@@ -165,8 +165,8 @@ struct PathItem: Identifiable, Hashable {
             size: isDirectory ? 0 : Int64(st.st_size),
             modified: modified,
             mode: UInt16(st.st_mode),
-            uid: Int32(st.st_uid),
-            gid: Int32(st.st_gid)
+            uid: st.st_uid,
+            gid: st.st_gid
         )
     }
 }

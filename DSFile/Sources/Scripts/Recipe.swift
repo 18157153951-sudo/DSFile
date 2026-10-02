@@ -18,14 +18,31 @@ struct ScriptRecipe: Codable {
     }
 
     struct Options: Codable {
-        var backup: Bool?
-        var killTarget: Bool?
-        var stopOnError: Bool?
-        var fixOwnership: Bool?
+        var backup: Bool
+        var killTarget: Bool
+        var stopOnError: Bool
+        var fixOwnership: Bool
 
-        static var `default`: Options {
-            return Options(backup: true, killTarget: true, stopOnError: true, fixOwnership: true)
+        init(backup: Bool = true,
+             killTarget: Bool = true,
+             stopOnError: Bool = true,
+             fixOwnership: Bool = true) {
+            self.backup = backup
+            self.killTarget = killTarget
+            self.stopOnError = stopOnError
+            self.fixOwnership = fixOwnership
         }
+
+        /// 缺字段时按「安全默认」补齐：备份开、结束目标开、出错即停开、自动修属主开
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            backup = try container.decodeIfPresent(Bool.self, forKey: .backup) ?? true
+            killTarget = try container.decodeIfPresent(Bool.self, forKey: .killTarget) ?? true
+            stopOnError = try container.decodeIfPresent(Bool.self, forKey: .stopOnError) ?? true
+            fixOwnership = try container.decodeIfPresent(Bool.self, forKey: .fixOwnership) ?? true
+        }
+
+        static var `default`: Options { Options() }
     }
 
     struct Step: Codable {
@@ -49,13 +66,7 @@ struct ScriptRecipe: Codable {
 
     var displayName: String { name ?? "未命名配方" }
     var effectiveOptions: Options {
-        guard let options = options else { return .default }
-        return Options(
-            backup: options.backup ?? true,
-            killTarget: options.killTarget ?? true,
-            stopOnError: options.stopOnError ?? true,
-            fixOwnership: options.fixOwnership ?? true
-        )
+        return options ?? .default
     }
 
     static func decode(from data: Data) throws -> ScriptRecipe {

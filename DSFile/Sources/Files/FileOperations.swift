@@ -155,7 +155,7 @@ enum FileOperations {
         }
         // 先走内核接口（root 文件需要），失败再退回 chmod(2)
         if DSKernel.setMode(path: path, mode: mode_t(value)) { return }
-        if chmod(path, mode_t(value)) == 0 { return }
+        if Darwin.chmod(path, mode_t(value)) == 0 { return }
         throw FileSystemError.denied(path)
     }
 
@@ -176,7 +176,7 @@ enum FileOperations {
 
         var changed = DSKernel.setOwner(path: path, uid: uid, gid: gid, recursive: false)
         if !changed {
-            changed = (chown(path, uid, gid) == 0)
+            changed = (Darwin.chown(path, uid, gid) == 0)
         }
         if !changed { throw FileSystemError.denied(path) }
     }
@@ -232,7 +232,7 @@ enum FileOperations {
 
     // MARK: - 二进制读取（十六进制查看器用）
 
-    static func readBytes(_ path: String, offset: Int64, length: Int) -> Data? {
+    static func readBytes(path: String, offset: Int64, length: Int) -> Data? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
         do {

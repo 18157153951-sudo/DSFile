@@ -17,15 +17,15 @@ typedef void (^DSShellOutputBlock)(NSString *line);
 + (BOOL)isShellAvailable NS_SWIFT_NAME(isShellAvailable());
 
 /// 同步执行一个 shell 脚本（调用方自己放到后台队列）
+/// Swift 侧名字：execScript(_:arguments:directory:environment:timeout:output:)
 /// @return 进程退出码；-1 表示启动失败（此时 error 有值）
-+ (int)runScriptAtPath:(NSString *)scriptPath
-             arguments:(nullable NSArray<NSString *> *)arguments
-             directory:(nullable NSString *)workingDirectory
-           environment:(nullable NSDictionary<NSString *, NSString *> *)environment
-               timeout:(NSTimeInterval)timeout
-                output:(nullable DSShellOutputBlock)output
-                 error:(NSError **)error
-    NS_SWIFT_NAME(runScript(path:arguments:directory:environment:timeout:output:));
++ (int)execScript:(NSString *)scriptPath
+        arguments:(nullable NSArray<NSString *> *)arguments
+        directory:(nullable NSString *)workingDirectory
+      environment:(nullable NSDictionary<NSString *, NSString *> *)environment
+          timeout:(NSTimeInterval)timeout
+           output:(nullable DSShellOutputBlock)output
+            error:(NSError **)error;
 
 /// 执行一段内联命令（/bin/sh -c "..."）
 + (int)runCommand:(NSString *)command
@@ -33,8 +33,7 @@ typedef void (^DSShellOutputBlock)(NSString *line);
       environment:(nullable NSDictionary<NSString *, NSString *> *)environment
           timeout:(NSTimeInterval)timeout
            output:(nullable DSShellOutputBlock)output
-            error:(NSError **)error
-    NS_SWIFT_NAME(runCommand(_:directory:environment:timeout:output:));
+            error:(NSError **)error;
 
 @end
 

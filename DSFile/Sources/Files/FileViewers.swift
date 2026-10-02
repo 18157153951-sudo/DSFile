@@ -147,12 +147,16 @@ private struct InfoValueText: View {
     }
 
     var body: some View {
-        let base = Text(text)
-        let styled = monospaced ? base.font(.system(.subheadline, design: .monospaced)) : base.font(.subheadline)
-        let colored = selectable ? styled.textSelection(.enabled) : styled
-        return colored
-            .foregroundColor(.secondary)
-            .multilineTextAlignment(.trailing)
+        Group {
+            if monospaced {
+                Text(text).font(.system(.subheadline, design: .monospaced))
+            } else {
+                Text(text).font(.subheadline)
+            }
+        }
+        .textSelection(selectable ? .enabled : .disabled)
+        .foregroundColor(.secondary)
+        .multilineTextAlignment(.trailing)
     }
 }
 
@@ -633,7 +637,7 @@ struct TextFileView: View {
             }
         }
         ToolbarItem(placement: .navigationBarTrailing) {
-            Button(action: save) {
+            Button { _ = save() } label: {
                 if isSaving {
                     ProgressView()
                 } else {
@@ -1094,6 +1098,8 @@ struct FileInfoView: View {
     @State private var isApplyingOwner: Bool = false
     /// 有动作正在跑时把其它动作按钮一起禁掉，避免并发改同一个路径
     @State private var isBusy: Bool = false
+    @State private var isDuplicating: Bool = false
+    @State private var isDeleting: Bool = false
 
     @State private var showRenameSheet: Bool = false
     @State private var showMoveSheet: Bool = false

@@ -674,7 +674,7 @@ struct ScriptDetailView: View {
         }
     }
 
-    private func optionBinding(_ keyPath: WritableKeyPath<ScriptRecipe.Options, Bool?>, default defaultValue: Bool) -> Binding<Bool> {
+    private func optionBinding(_ keyPath: WritableKeyPath<ScriptRecipe.Options, Bool>, default defaultValue: Bool) -> Binding<Bool> {
         return Binding(
             get: {
                 guard let recipe = recipe else { return defaultValue }

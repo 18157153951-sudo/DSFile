@@ -349,12 +349,12 @@ struct ShellScriptRunner {
         }
 
         do {
-            let code = try DSShell.runScript(path: path,
-                                             arguments: [],
-                                             directory: directory,
-                                             environment: environment,
-                                             timeout: timeout,
-                                             output: output)
+            let code = try DSShell.execScript(path,
+                                              arguments: [],
+                                              directory: directory,
+                                              environment: environment,
+                                              timeout: timeout,
+                                              output: output)
             return (code, nil)
         } catch {
             return (-1, error.localizedDescription)

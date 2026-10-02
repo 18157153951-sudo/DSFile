@@ -68,13 +68,13 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
     return access("/bin/sh", X_OK) == 0;
 }
 
-+ (int)runScriptAtPath:(NSString *)scriptPath
-             arguments:(NSArray<NSString *> *)arguments
-             directory:(NSString *)workingDirectory
-           environment:(NSDictionary<NSString *, NSString *> *)environment
-               timeout:(NSTimeInterval)timeout
-                output:(DSShellOutputBlock)output
-                 error:(NSError **)error
++ (int)execScript:(NSString *)scriptPath
+        arguments:(NSArray<NSString *> *)arguments
+        directory:(NSString *)workingDirectory
+      environment:(NSDictionary<NSString *, NSString *> *)environment
+          timeout:(NSTimeInterval)timeout
+           output:(DSShellOutputBlock)output
+            error:(NSError **)error
 {
     if (scriptPath.length == 0) {
         if (error) *error = ds_error(-1, @"脚本路径为空");

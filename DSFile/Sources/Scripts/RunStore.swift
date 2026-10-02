@@ -21,8 +21,8 @@ struct BackupEntry: Codable, Identifiable {
     /// 覆盖前原本是否存在（false 表示这是脚本新建的文件，回滚时要删掉）
     var existed: Bool
     var mode: String?
-    var uid: Int32?
-    var gid: Int32?
+    var uid: uid_t?
+    var gid: gid_t?
     var size: Int64
 }
 
