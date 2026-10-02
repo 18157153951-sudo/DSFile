@@ -229,8 +229,12 @@ static uint32_t ds_cpu_family(void)
 
 + (BOOL)isSystemVersionSupported
 {
-    return SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"17.0") &&
-           SYSTEM_VERSION_LESS_THAN(@"26.1");
+    // ClearSword 的 offsets_init 只覆盖 17.0 ≤ 版本 < 26.1；这里不依赖任何第三方宏
+    NSOperatingSystemVersion version = [[NSProcessInfo processInfo] operatingSystemVersion];
+    if (version.majorVersion < 17) return NO;
+    if (version.majorVersion > 26) return NO;
+    if (version.majorVersion == 26 && version.minorVersion >= 1) return NO;
+    return YES;
 }
 
 + (NSString *)supportSummary
