@@ -78,8 +78,10 @@ final class DSLog: ObservableObject {
         writeQueue.sync { [weak self] in
             guard let self = self, let handle = self.fileHandle else { return }
             if let data = payload.data(using: .utf8) {
-                // 同步写：进程被漏洞搞崩时，日志尾巴必须已经在磁盘上（异步写会整段丢掉）
+                // 同步写 + fsync：内核 panic 重启时，还留在 page cache 里的脏页会整段丢失，
+                // 磁盘上只留一个 0 字节文件（已实测踩过）。所以每一批都强制落盘。
                 try? handle.write(contentsOf: data)
+                try? handle.synchronize()
             }
         }
 
@@ -121,6 +123,7 @@ final class DSLog: ObservableObject {
             let header = "=== DSFile 会话日志 \(Date()) ===\n"
             if let data = header.data(using: .utf8) {
                 try? handle.write(contentsOf: data)
+                try? handle.synchronize()
             }
         }
     }

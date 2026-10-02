@@ -319,7 +319,7 @@ static uint32_t ds_cpu_family(void)
             gExploitAttempted = YES;
             if (log) log([NSString stringWithFormat:@"[DSFile] 目标: %@ / iOS %@ / %@",
                           [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
-            if (log) log(@"[DSFile] 开始执行内核漏洞（ClearSword 后端，可能耗时数秒，界面短暂无响应属正常）…");
+            if (log) log(@"[DSFile] 开始执行内核漏洞（lara darksword 后端，可能耗时数秒，界面短暂无响应属正常）…");
 
             int kret = 1;
             @try {
