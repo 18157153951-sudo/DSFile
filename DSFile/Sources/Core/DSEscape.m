@@ -864,7 +864,9 @@ static void ds_dump_cred_diagnostics(uint64_t cred)
     ds_log("[诊断] 以上均为只读；本轮不跟随任何指针、不写任何内核内存");
 }
 
-int DSEscapeSandbox(ds_escape_log_fn log)
+/// 诊断模式（保留备用：把 DSEscapeSandbox 换成它即可）。
+/// 只读「已确认对象」内部、绝不跟随指针、绝不写内核内存 —— 构造上不可能把内核读崩。
+static int DSEscapeDiagnosticOnly(ds_escape_log_fn log)
 {
     gLog = log;
 
@@ -883,10 +885,16 @@ int DSEscapeSandbox(ds_escape_log_fn log)
     return -7;
 }
 
-int DSEscapeSandboxFull(ds_escape_log_fn log)
+int DSEscapeSandbox(ds_escape_log_fn log)
 {
     gLog = log;
     int result = DSEscapeSandboxInternal();
+
+    // 失败时追加一份「cred 字段形态」的只读诊断，便于下一轮定位（不做任何跟随/写入）
+    if (result != 0 && gUcred) {
+        ds_log("[逃逸] 本次未成功，追加只读诊断：");
+        ds_dump_cred_diagnostics(gUcred);
+    }
 
     // 自检：真的能写沙盒外的路径才算成功
     const char *probe = "/var/mobile/.dsfile_probe";
