@@ -75,10 +75,6 @@ static uint64_t ds_safe_self_proc(DSKernelLogBlock log)
     return proc;
 }
 
-@implementation DSKernel
-
-#pragma mark - 设备 / 系统
-
 static BOOL gExploitRunning = NO;
 static BOOL gExploitAttempted = NO;
 static BOOL gExploitDone    = NO;
