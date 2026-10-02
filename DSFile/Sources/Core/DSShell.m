@@ -85,11 +85,26 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
         return -1;
     }
 
-    NSMutableArray<NSString *> *argv = [NSMutableArray arrayWithObjects:@"/bin/sh", scriptPath, nil];
+    NSMutableArray<NSString *> *argv = [NSMutableArray array];
+    if (workingDirectory.length > 0) {
+        // iOS 上没有 posix_spawn_file_actions_addchdir_np（那是 macOS 专有），
+        // 这里用 sh 内建 cd 换工作目录，路径作为独立 argv 传入，不拼接字符串，天然没有注入问题：
+        //   sh -c 'cd "$1" || exit 1; shift; exec "$@"' sh <目录> /bin/sh <脚本> [参数…]
+        [argv addObject:@"/bin/sh"];
+        [argv addObject:@"-c"];
+        [argv addObject:@"cd \"$1\" || exit 1; shift; exec \"$@\""];
+        [argv addObject:@"sh"];
+        [argv addObject:workingDirectory];
+        [argv addObject:@"/bin/sh"];
+        [argv addObject:scriptPath];
+    } else {
+        [argv addObject:@"/bin/sh"];
+        [argv addObject:scriptPath];
+    }
     if (arguments.count > 0) [argv addObjectsFromArray:arguments];
 
     return [self ds_spawn:argv
-                directory:workingDirectory
+                directory:nil
               environment:environment
                   timeout:timeout
                    output:output
@@ -112,8 +127,16 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
         return -1;
     }
 
+    if (workingDirectory.length > 0) {
+        return [self ds_spawn:@[ @"/bin/sh", @"-c", @"cd \"$1\" || exit 1; shift; exec /bin/sh -c \"$1\"", @"sh", workingDirectory, command ]
+                    directory:nil
+                  environment:environment
+                      timeout:timeout
+                       output:output
+                        error:error];
+    }
     return [self ds_spawn:@[ @"/bin/sh", @"-c", command ]
-                directory:workingDirectory
+                directory:nil
               environment:environment
                   timeout:timeout
                    output:output
@@ -141,9 +164,9 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
     posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
     posix_spawn_file_actions_addclose(&actions, fds[0]);
     posix_spawn_file_actions_addclose(&actions, fds[1]);
-    if (workingDirectory.length > 0) {
-        posix_spawn_file_actions_addchdir_np(&actions, workingDirectory.fileSystemRepresentation);
-    }
+    // 工作目录由调用方通过 sh 的 cd 包装处理（见 execScript / runCommand），
+    // 这里不再使用 posix_spawn_file_actions_addchdir_np —— 它在 iOS 上不存在。
+    (void)workingDirectory;
 
     char **cargv = ds_build_argv(argv);
     char **cenvp = ds_build_envp(environment);
