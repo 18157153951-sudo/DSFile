@@ -54,7 +54,7 @@ jobs:
         run: |
           BIN=build/Release-iphoneos/DSFile.app/DSFile
           ls -lh "$BIN"
-          for SYMBOL in kexploit_opa334 sandbox_escape; do
+          for SYMBOL in clearsword_run early_kread64 DSEscapeSandbox; do
             if nm -a "$BIN" 2>/dev/null | grep -q "$SYMBOL"; then
               echo "✅ 找到符号 $SYMBOL"
             else
