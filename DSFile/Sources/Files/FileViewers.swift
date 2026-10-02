@@ -147,6 +147,14 @@ private struct InfoValueText: View {
     }
 
     var body: some View {
+        if selectable {
+            content.textSelection(.enabled)
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
         Group {
             if monospaced {
                 Text(text).font(.system(.subheadline, design: .monospaced))
@@ -154,7 +162,6 @@ private struct InfoValueText: View {
                 Text(text).font(.subheadline)
             }
         }
-        .textSelection(selectable ? .enabled : .disabled)
         .foregroundColor(.secondary)
         .multilineTextAlignment(.trailing)
     }

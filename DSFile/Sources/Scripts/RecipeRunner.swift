@@ -348,17 +348,18 @@ struct ShellScriptRunner {
             return (-1, "/bin/sh 不存在或不可执行，这个环境跑不了 shell 脚本")
         }
 
-        do {
-            let code = try DSShell.execScript(path,
-                                              arguments: [],
-                                              directory: directory,
-                                              environment: environment,
-                                              timeout: timeout,
-                                              output: output)
-            return (code, nil)
-        } catch {
-            return (-1, error.localizedDescription)
+        var shellError: NSError?
+        let code = DSShell.execScript(path,
+                                      arguments: [],
+                                      directory: directory,
+                                      environment: environment,
+                                      timeout: timeout,
+                                      output: output,
+                                      error: &shellError)
+        if let shellError = shellError {
+            return (-1, shellError.localizedDescription)
         }
+        return (code, nil)
     }
 }
 
