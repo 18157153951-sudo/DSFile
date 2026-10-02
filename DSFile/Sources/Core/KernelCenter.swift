@@ -95,7 +95,10 @@ final class KernelCenter: ObservableObject {
     }
 
     func activate() {
-        guard !busy else { return }
+        guard !busy else {
+            DSLog.shared.warn("已经有一次激活在进行中，忽略这次点击（重复执行漏洞极易把设备搞崩）", source: "内核")
+            return
+        }
         if !DSKernel.isSystemVersionSupported() {
             phase = .unsupported(DSKernel.supportSummary())
             DSLog.shared.warn(DSKernel.supportSummary(), source: "内核")

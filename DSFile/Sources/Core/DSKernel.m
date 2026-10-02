@@ -26,6 +26,7 @@ extern uint64_t g_kernel_base;
 #pragma mark - 状态
 
 static BOOL gExploitRunning = NO;
+static BOOL gExploitAttempted = NO;
 static BOOL gExploitDone    = NO;
 static BOOL gEscaped        = NO;
 static NSError *gLastError  = nil;
@@ -261,7 +262,15 @@ static uint32_t ds_cpu_family(void)
             // 漏洞已经拿到过，只补做沙盒改写（重跑漏洞会 panic）
             if (log) log(@"[DSFile] 内核读写已在本次进程内取得，跳过漏洞，只重试沙盒改写");
             result = [self ds_escapeStepWithLog:log];
+        } else if (gExploitAttempted) {
+            // 同一进程里第二次跑内核漏洞极易把设备搞崩，这里直接拦掉
+            if (log) log(@"[DSFile] 本次运行已经执行过一次内核漏洞且没有成功。同一个进程里重跑风险极高，"
+                          "请从后台完全退出 App 再重新打开后重试。");
+            gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
+                                         userInfo:@{ NSLocalizedDescriptionKey: @"本次运行已尝试过内核漏洞，请重启 App 后再试" }];
+            result = DSKernelResultExploitFailed;
         } else {
+            gExploitAttempted = YES;
             if (log) log([NSString stringWithFormat:@"[DSFile] 目标: %@ / iOS %@ / %@", [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
             if (log) log(@"[DSFile] 开始执行内核漏洞（可能耗时数秒，期间界面会卡住是正常的）…");
 

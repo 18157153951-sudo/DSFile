@@ -75,9 +75,10 @@ final class DSLog: ObservableObject {
             "[\(DSLog.timeFormatter.string(from: line.date))][\(line.level.rawValue)][\(line.source)] \(line.text)\n"
         }.joined()
 
-        writeQueue.async { [weak self] in
+        writeQueue.sync { [weak self] in
             guard let self = self, let handle = self.fileHandle else { return }
             if let data = payload.data(using: .utf8) {
+                // 同步写：进程被漏洞搞崩时，日志尾巴必须已经在磁盘上（异步写会整段丢掉）
                 try? handle.write(contentsOf: data)
             }
         }

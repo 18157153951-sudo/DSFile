@@ -14,6 +14,11 @@ struct DSFileApp: App {
     @StateObject private var kernel = KernelCenter.shared
     @StateObject private var browser = BrowserModel()
 
+    init() {
+        // 越早越好：内核漏洞跑挂时，把信号与回溯写进 Documents/Logs/crash-*.log
+        DSCrash.install()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootTabView()

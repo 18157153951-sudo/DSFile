@@ -160,6 +160,10 @@ struct SettingsView: View {
     /// 提权行
     private var elevateRow: some View {
         Button(action: {
+            guard DSKernel.isExploitDone() else {
+                DSLog.shared.warn("还没有内核读写，「提权到 root」现在点了也不会生效：请先点上面的「激活内核访问」", source: "设置")
+                return
+            }
             DSLog.shared.info("用户请求提权到 root", source: "设置")
             kernel.elevateToRoot()
         }) {
@@ -171,7 +175,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("提权到 root")
                         .font(.subheadline)
-                    Text(kernel.isRoot ? "当前已经是 root（uid 0）" : "把本进程的 uid 换成 0，写 root 文件更省事")
+                    Text(elevateSubtitle)
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -182,7 +186,13 @@ struct SettingsView: View {
                 }
             }
         }
-        .disabled(kernel.busy || kernel.isRoot)
+        .disabled(kernel.busy || kernel.isRoot || !DSKernel.isExploitDone())
+    }
+
+    private var elevateSubtitle: String {
+        if kernel.isRoot { return "当前已经是 root（uid 0）" }
+        if !DSKernel.isExploitDone() { return "需要先激活内核访问；这是可选的补救手段，点了没反应说明条件还不满足" }
+        return "把本进程的 uid 换成 0，写 root 文件更省事（有轻微风险，写不进 root 文件时再用）"
     }
 
     /// 自动激活开关
@@ -235,6 +245,18 @@ struct SettingsView: View {
                       title: "分享日志文件",
                       subtitle: logFileSubtitle) {
                 shareLogFile()
+            }
+            actionRow(icon: "exclamationmark.triangle",
+                      tint: .orange,
+                      title: "分享崩溃报告",
+                      subtitle: "上一次崩溃的信号与回溯（Documents/Logs/crash-*.log）") {
+                if let crashPath = DSCrash.latestCrashReportPath() {
+                    DSLog.shared.info("分享崩溃报告 \(crashPath)", source: "设置")
+                    DSPickers.presentShareSheet(urls: [URL(fileURLWithPath: crashPath)])
+                } else {
+                    presentAlert("还没有崩溃报告",
+                                 "目前没有记录到崩溃。注意：如果 App 是被系统看门狗杀掉、或者设备直接重启，这里可能不会生成文件。")
+                }
             }
             actionRow(icon: "checkmark.shield",
                       tint: .blue,
