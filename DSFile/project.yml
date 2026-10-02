@@ -1,0 +1,80 @@
+name: DSFile
+options:
+  bundleIdPrefix: com.dsfile
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+targets:
+  DSFile:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Vendor/Escape
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: 暗剑文件
+        CFBundleName: DSFile
+        UILaunchScreen: {}
+        # 让 App 自己的 Documents 在「文件」App 里可见，方便导入脚本 / 导出日志
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # 我们不做任何网络请求；这里保持默认，不放开明文 HTTP
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_NAME: DSFile
+        PRODUCT_BUNDLE_IDENTIFIER: com.dsfile.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # 出的是未签名 IPA，签名交给 eSign / 证书重签，entitlements 保持干净
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+        ARCHS: arm64
+        ONLY_ACTIVE_ARCH: NO
+        ENABLE_BITCODE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Core/DSFile-Bridging-Header.h
+        CLANG_ENABLE_MODULES: YES
+        # 逃逸代码与桥接层都按 ARC 写；显式打开，避免 xcodebuild 默认值差异
+        CLANG_ENABLE_OBJC_ARC: YES
+        GCC_C_LANGUAGE_STANDARD: gnu11
+        # 逃逸内核代码不在 SDK 头文件覆盖范围里，用 Vendor 里的兼容头
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/Vendor/Escape/Shims
+          - $(SRCROOT)/Vendor/Escape
+          - $(SRCROOT)/Sources/Core
+        OTHER_CFLAGS:
+          - -I$(SRCROOT)/Vendor/Escape/Shims
+          - -I$(SRCROOT)/Vendor/Escape
+          - -Wno-unused-function
+          - -Wno-unused-variable
+          - -Wno-unused-but-set-variable
+          - -Wno-incompatible-pointer-types
+          - -Wno-incompatible-pointer-types-discards-qualifiers
+          - -Wno-deprecated-declarations
+          - -Wno-format
+          - -Wno-everything
+        OTHER_LDFLAGS:
+          - -framework
+          - Foundation
+          - -framework
+          - UIKit
+          - -framework
+          - CoreFoundation
+          - -lz

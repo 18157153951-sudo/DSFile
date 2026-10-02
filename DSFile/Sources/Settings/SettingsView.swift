@@ -1,0 +1,599 @@
+//
+//  SettingsView.swift — 设置页（内核访问 / 诊断 / 更新日志 / 日志 / 关于）
+//
+//  约定：
+//  1. 只观察 KernelCenter.shared、DSLog.shared、RunStore.shared 三个单例，不二次创建（因此用 @ObservedObject，不用 @StateObject）；
+//  2. 所有内核动作都经 KernelCenter 转发，本页面不直接调用 DSKernel 的漏洞接口；
+//  3. 只用 iOS 15 就有的 API：NavigationView / Form / Section / Toggle / .alert / ScrollViewReader；
+//  4. 颜色全部用系统语义色，说明文案一律放 Section 的 footer。
+//
+
+import SwiftUI
+import Foundation
+import UIKit
+
+// MARK: - 更新日志数据
+
+private struct ChangeEntry: Identifiable {
+    var version: String
+    var date: String
+    var items: [String]
+    var id: String { version }
+}
+
+// MARK: - 设置页
+
+struct SettingsView: View {
+
+    // MARK: 依赖（单例只观察，不重新创建）
+
+    @ObservedObject private var kernel = KernelCenter.shared
+    @ObservedObject private var log = DSLog.shared
+    @ObservedObject private var store = RunStore.shared
+
+    // MARK: 本地状态
+
+    @State private var alertTitle: String = ""
+    @State private var alertMessage: String = ""
+    @State private var alertVisible: Bool = false
+
+    // MARK: 常量
+
+    private static let appName = "暗剑文件"
+    private static let appVersion = "0.1.0"
+    private static let appBuild = "1"
+    private static let maxVisibleLogLines = 300
+
+    private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.1.0", date: "2026-10-03", items: [
+            "全新文件管理器：整机文件浏览、文本编辑、十六进制查看、权限与属主修改",
+            "脚本页：导入自己准备好的配方（JSON）或 shell 脚本，一键替换目标 App 里指定的文件",
+            "每次替换前自动整份备份，记录页可一键回滚",
+            "内核访问改为手动触发并带自检，激活失败会明确告诉你原因"
+        ])
+    ]
+
+    // MARK: - 页面
+
+    var body: some View {
+        NavigationView {
+            Form {
+                kernelSection
+                diagnosticsSection
+                changeLogSection
+                logSection
+                aboutSection
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("设置")
+            .alert(isPresented: $alertVisible) {
+                Alert(title: Text(alertTitle),
+                      message: Text(alertMessage),
+                      dismissButton: .default(Text("好")))
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    // MARK: - 1. 内核访问
+
+    private var kernelSection: some View {
+        Section {
+            statusRow
+            ForEach(deviceItems) { item in
+                InfoRow(icon: item.icon,
+                        tint: item.tint,
+                        title: item.label,
+                        detail: item.value,
+                        monospaced: item.monospaced)
+            }
+            activationRow
+            elevateRow
+            autoActivateToggle
+        } header: {
+            Text("内核访问")
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(kernel.phase.detail)
+                Text("「提权到 root」只在遇到 root 拥有的文件写不进去时才需要，失败也不会影响已经拿到的能力。")
+                Text("每次冷启动都要重新激活；内核漏洞有小概率导致设备重启，动手前请先保存好手头的工作；所有操作都由你自己手动触发，只作用于本机。")
+            }
+            .font(.footnote)
+            .foregroundColor(.secondary)
+        }
+    }
+
+    /// 一行状态：标题用语义色，副标题给运行期摘要
+    private var statusRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: phaseIcon)
+                .font(.title3)
+                .foregroundColor(phaseColor)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(kernel.phase.title)
+                    .font(.subheadline)
+                    .foregroundColor(phaseColor)
+                Text(kernel.busy ? "正在执行，请勿退出 App" : runtimeSummary)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// 主按钮：未激活 → 激活；已激活 → 已激活 + 重新检测；只差沙盒改写 → 重试沙盒改写
+    private var activationRow: some View {
+        HStack(spacing: 12) {
+            Spacer()
+            if kernel.busy {
+                ProgressView()
+                Text("激活中…")
+                    .fontWeight(.semibold)
+            } else if kernel.phase.isActive {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundColor(.green)
+                Text("已激活")
+                    .fontWeight(.semibold)
+                    .foregroundColor(.green)
+                Button("重新检测") {
+                    kernel.refresh()
+                    DSLog.shared.info("手动重新检测内核状态", source: "设置")
+                }
+                .font(.footnote)
+            } else if isExploitOnly {
+                Button(action: { kernel.retryEscape() }) {
+                    Text("重试沙盒改写")
+                        .fontWeight(.semibold)
+                }
+            } else {
+                Button(action: { kernel.activate() }) {
+                    Text("激活内核访问")
+                        .fontWeight(.semibold)
+                }
+            }
+            Spacer()
+        }
+        .disabled(kernel.busy)
+    }
+
+    /// 提权行
+    private var elevateRow: some View {
+        Button(action: {
+            DSLog.shared.info("用户请求提权到 root", source: "设置")
+            kernel.elevateToRoot()
+        }) {
+            HStack(spacing: 12) {
+                Image(systemName: "lock.open.fill")
+                    .font(.title3)
+                    .foregroundColor(kernel.isRoot ? .green : .orange)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("提权到 root")
+                        .font(.subheadline)
+                    Text(kernel.isRoot ? "当前已经是 root（uid 0）" : "把本进程的 uid 换成 0，写 root 文件更省事")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                if kernel.busy {
+                    ProgressView()
+                }
+            }
+        }
+        .disabled(kernel.busy || kernel.isRoot)
+    }
+
+    /// 自动激活开关
+    private var autoActivateToggle: some View {
+        Toggle(isOn: $kernel.autoActivate) {
+            HStack(spacing: 12) {
+                Image(systemName: "bolt.fill")
+                    .font(.title3)
+                    .foregroundColor(.orange)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("启动时自动激活")
+                        .font(.subheadline)
+                    Text(kernel.autoActivate ? "冷启动后自动尝试一次，仍需要内核自检通过" : "只有手动点按钮才会激活")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    // MARK: - 2. 诊断
+
+    private var diagnosticsSection: some View {
+        Section {
+            InfoRow(icon: "externaldrive.fill",
+                    tint: .blue,
+                    title: "本地备份",
+                    detail: "\(store.backups.count) 份备份 · \(store.runs.count) 条运行记录")
+            InfoRow(icon: "folder.fill",
+                    tint: .blue,
+                    title: "备份目录",
+                    detail: store.backupsRoot,
+                    monospaced: true)
+            actionRow(icon: "doc.on.doc.fill",
+                      tint: .blue,
+                      title: "复制诊断信息",
+                      subtitle: "机型 / 系统 / 内核状态一次性复制到剪贴板") {
+                copyDiagnostics()
+            }
+            actionRow(icon: "square.and.arrow.up",
+                      tint: .blue,
+                      title: "分享诊断信息",
+                      subtitle: "导出成文本文件，方便回传排查") {
+                shareDiagnostics()
+            }
+            actionRow(icon: "doc.text.magnifyingglass",
+                      tint: .blue,
+                      title: "分享日志文件",
+                      subtitle: logFileSubtitle) {
+                shareLogFile()
+            }
+            actionRow(icon: "checkmark.shield",
+                      tint: .blue,
+                      title: "现场自检文件系统",
+                      subtitle: "马上做一次真实的写盘探针，不读缓存") {
+                probeFilesystem()
+            }
+        } header: {
+            Text("诊断")
+        } footer: {
+            Text("自检不依赖缓存：在沙盒外写一个探针文件再删掉，能过才说明整机读写真的可用。")
+                .font(.footnote)
+        }
+    }
+
+    /// 统一的「动作行」：28pt 图标 + 标题 + 说明 + 右侧箭头
+    private func actionRow(icon: String,
+                           tint: Color,
+                           title: String,
+                           subtitle: String,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundColor(tint)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline)
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    // MARK: - 3. 更新日志
+
+    private var changeLogSection: some View {
+        Section {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Self.changeLog) { entry in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(entry.version) · \(entry.date)")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                            ForEach(entry.items, id: \.self) { item in
+                                Text("• \(item)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(minHeight: 180, maxHeight: 260)
+        } header: {
+            Text("更新日志")
+        }
+    }
+
+    // MARK: - 4. 日志
+
+    private var logSection: some View {
+        Section {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(recentLines) { line in
+                            Text(line.displayText)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(levelColor(line.level))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(line.id)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(minHeight: 180, maxHeight: 260)
+                .onAppear {
+                    scrollToBottom(proxy: proxy, animated: false)
+                }
+                .onChange(of: log.lines.count) { _ in
+                    scrollToBottom(proxy: proxy, animated: true)
+                }
+            }
+            actionRow(icon: "trash",
+                      tint: .red,
+                      title: "清空界面日志",
+                      subtitle: "只清空界面显示，落盘的日志文件不动") {
+                clearLog()
+            }
+        } header: {
+            Text("日志")
+        } footer: {
+            Text("界面最多显示最近 \(Self.maxVisibleLogLines) 条（当前 \(recentLines.count) 条）；完整日志按会话写在 Documents/Logs 下，可以用上面的「分享日志文件」导出。")
+                .font(.footnote)
+        }
+    }
+
+    // MARK: - 5. 关于
+
+    private var aboutSection: some View {
+        Section {
+            InfoRow(icon: "info.circle",
+                    tint: .blue,
+                    title: "名称",
+                    detail: "\(Self.appName)（DSFile）")
+            InfoRow(icon: "number",
+                    tint: .blue,
+                    title: "版本",
+                    detail: "\(Self.appVersion)（Build \(Self.appBuild)）")
+            InfoRow(icon: "heart.fill",
+                    tint: .pink,
+                    title: "致谢",
+                    detail: "内核漏洞与沙盒逃逸来自公开项目 FilzaJailedDS / darksword-kexploit-fun / lara，本项目只做 UI 与脚本引擎。")
+        } header: {
+            Text("关于")
+        } footer: {
+            Text("仅供在自己的设备上管理自己的数据；替换他人 App 的文件前请确认你有权这么做；动手之前务必自行备份。")
+                .font(.footnote)
+        }
+    }
+
+    // MARK: - 计算属性
+
+    private var isExploitOnly: Bool {
+        if case .exploitOnly = kernel.phase {
+            return true
+        }
+        return false
+    }
+
+    private var phaseColor: Color {
+        switch kernel.phase {
+        case .escaped:
+            return .green
+        case .running:
+            return .orange
+        case .failed, .unsupported:
+            return .red
+        case .idle, .exploitOnly:
+            return .secondary
+        }
+    }
+
+    private var phaseIcon: String {
+        switch kernel.phase {
+        case .escaped:
+            return "checkmark.seal.fill"
+        case .running:
+            return "hourglass"
+        case .failed, .unsupported:
+            return "exclamationmark.triangle.fill"
+        case .exploitOnly:
+            return "exclamationmark.circle.fill"
+        case .idle:
+            return "power"
+        }
+    }
+
+    private var runtimeSummary: String {
+        let base: String
+        if kernel.kernelBase == 0 {
+            base = "内核基址未获取"
+        } else {
+            base = String(format: "内核基址 0x%llx", kernel.kernelBase)
+        }
+        return base + " · " + (kernel.isRoot ? "uid 0" : "uid mobile")
+    }
+
+    private var deviceItems: [DeviceInfoItem] {
+        var items: [DeviceInfoItem] = []
+        items.append(DeviceInfoItem(icon: "iphone", tint: .blue, label: "机型",
+                                    value: DSKernel.deviceModelIdentifier(), monospaced: true))
+        items.append(DeviceInfoItem(icon: "gear", tint: .blue, label: "系统",
+                                    value: "iOS \(DSKernel.systemVersion())", monospaced: true))
+        items.append(DeviceInfoItem(icon: "cpu", tint: .purple, label: "芯片",
+                                    value: DSKernel.cpuFamilyName(), monospaced: false))
+        items.append(DeviceInfoItem(icon: "checkmark.shield",
+                                    tint: DSKernel.isSystemVersionSupported() ? .green : .red,
+                                    label: "支持情况",
+                                    value: DSKernel.supportSummary(),
+                                    monospaced: false))
+        items.append(DeviceInfoItem(icon: "shield", tint: .blue, label: "内核基址",
+                                    value: kernelBaseText, monospaced: true))
+        items.append(DeviceInfoItem(icon: "person.fill",
+                                    tint: kernel.isRoot ? .green : .secondary,
+                                    label: "当前身份",
+                                    value: kernel.isRoot ? "root（uid 0）" : "mobile（uid 501）",
+                                    monospaced: false))
+        items.append(DeviceInfoItem(icon: "bolt.fill",
+                                    tint: DSKernel.isExploitDone() ? .green : .secondary,
+                                    label: "内核读写",
+                                    value: DSKernel.isExploitDone() ? "已拿到（本次运行有效）" : "还没拿到",
+                                    monospaced: false))
+        items.append(DeviceInfoItem(icon: "lock.open.fill",
+                                    tint: DSKernel.isEscaped() ? .green : .secondary,
+                                    label: "沙盒逃逸",
+                                    value: DSKernel.isEscaped() ? "已逃逸，可访问整机文件" : "未逃逸，只能访问自己的沙盒",
+                                    monospaced: false))
+        return items
+    }
+
+    private var kernelBaseText: String {
+        if kernel.kernelBase == 0 {
+            return "—"
+        }
+        return String(format: "0x%llx", kernel.kernelBase)
+    }
+
+    private var recentLines: [DSLogLine] {
+        let all = log.lines
+        if all.count <= Self.maxVisibleLogLines {
+            return all
+        }
+        return Array(all.suffix(Self.maxVisibleLogLines))
+    }
+
+    private var logFileSubtitle: String {
+        guard let url = log.logFileURL else {
+            return "本次会话的日志文件还没生成"
+        }
+        return url.lastPathComponent
+    }
+
+    private func levelColor(_ level: DSLogLevel) -> Color {
+        switch level {
+        case .info:
+            return .primary
+        case .warn:
+            return .orange
+        case .error:
+            return .red
+        case .kernel:
+            return .teal
+        }
+    }
+
+    // MARK: - 动作
+
+    private func presentAlert(_ title: String, _ message: String) {
+        alertTitle = title
+        alertMessage = message
+        alertVisible = true
+    }
+
+    private func copyDiagnostics() {
+        UIPasteboard.general.string = DSKernel.diagnosticsText()
+        DSLog.shared.info("已复制诊断信息到剪贴板", source: "设置")
+        presentAlert("诊断信息已复制", "现在可以直接粘贴到聊天窗口或备忘录里。")
+    }
+
+    private func shareDiagnostics() {
+        let text = DSKernel.diagnosticsText()
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("DSFile-诊断.txt")
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            DSLog.shared.error("导出诊断信息失败：\(error.localizedDescription)", source: "设置")
+            presentAlert("导出失败", error.localizedDescription)
+            return
+        }
+        DSLog.shared.info("导出诊断信息到 \(url.path)", source: "设置")
+        DSPickers.presentShareSheet(urls: [url])
+    }
+
+    private func shareLogFile() {
+        guard let url = log.logFileURL else {
+            presentAlert("日志文件还没准备好", "本次会话的日志文件尚未创建，稍后再试。")
+            return
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            presentAlert("日志文件不存在", "找不到 \(url.lastPathComponent)，可能已经被清理掉了。")
+            return
+        }
+        DSLog.shared.info("分享日志文件 \(url.lastPathComponent)", source: "设置")
+        DSPickers.presentShareSheet(urls: [url])
+    }
+
+    private func probeFilesystem() {
+        if DSKernel.probeFilesystemAccess() {
+            DSLog.shared.info("现场自检通过：沙盒外读写可用", source: "设置")
+            presentAlert("自检通过", "刚刚在沙盒外成功写入并删除了一笔探针文件，当前可以读写整机文件。")
+        } else {
+            DSLog.shared.warn("现场自检没通过：沙盒外读写不可用", source: "设置")
+            presentAlert("自检没通过", "这次探针写盘失败了。如果状态显示「已激活」，可以先点「重试沙盒改写」，或者试一次「提权到 root」。")
+        }
+    }
+
+    private func clearLog() {
+        DSLog.shared.clear()
+        DSLog.shared.info("界面日志已清空", source: "设置")
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
+        guard let last = recentLines.last else { return }
+        if animated {
+            withAnimation(.linear(duration: 0.15)) {
+                proxy.scrollTo(last.id, anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo(last.id, anchor: .bottom)
+        }
+    }
+}
+
+// MARK: - 行模型
+
+private struct DeviceInfoItem: Identifiable {
+    var icon: String
+    var tint: Color
+    var label: String
+    var value: String
+    var monospaced: Bool
+    var id: String { label }
+}
+
+// MARK: - 信息行（28pt 图标 + 标题 + 元信息）
+
+private struct InfoRow: View {
+
+    var icon: String
+    var tint: Color
+    var title: String
+    var detail: String? = nil
+    var monospaced: Bool = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundColor(tint)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                if let detail = detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(monospaced ? Font.system(.caption2, design: .monospaced) : Font.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(monospaced ? 1 : nil)
+                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+            }
+        }
+    }
+}

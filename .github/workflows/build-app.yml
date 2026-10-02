@@ -1,0 +1,84 @@
+name: Build App
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'DSFile/**'
+      - '.github/workflows/build-app.yml'
+  pull_request:
+    paths:
+      - 'DSFile/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        working-directory: DSFile
+        run: xcodegen generate
+
+      - name: 打上构建标记
+        working-directory: DSFile
+        run: |
+          STAMP="$(git rev-parse --short HEAD) · $(date -u '+%m-%d %H:%M')"
+          sed -i '' -e "s|static let stamp = \"dev\"|static let stamp = \"${STAMP}\"|" Sources/Core/BuildInfo.swift
+          cat Sources/Core/BuildInfo.swift
+
+      - name: 编译 App（不签名）
+        working-directory: DSFile
+        run: |
+          xcodebuild build \
+            -project DSFile.xcodeproj \
+            -target DSFile \
+            -configuration Release \
+            -sdk iphoneos \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            COPY_PHASE_STRIP=NO \
+            STRIP_INSTALLED_PRODUCT=NO
+
+      - name: 确认漏洞代码真的被链进去了
+        working-directory: DSFile
+        run: |
+          BIN=build/Release-iphoneos/DSFile.app/DSFile
+          ls -lh "$BIN"
+          for SYMBOL in kexploit_opa334 sandbox_escape; do
+            if nm -a "$BIN" 2>/dev/null | grep -q "$SYMBOL"; then
+              echo "✅ 找到符号 $SYMBOL"
+            else
+              echo "❌ 二进制里没有 $SYMBOL —— 内核逃逸代码没编进去，装上去也是白装"
+              exit 1
+            fi
+          done
+          echo "== 架构 =="
+          lipo -info "$BIN"
+
+      - name: 打包未签名 IPA
+        working-directory: DSFile
+        run: |
+          rm -rf Payload DSFile.ipa
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/DSFile.app Payload/
+          zip -qry DSFile.ipa Payload
+          ls -lh DSFile.ipa
+          echo "SHA256: $(shasum -a 256 DSFile.ipa | awk '{print $1}')"
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSFile-ipa
+          path: DSFile/DSFile.ipa
+          if-no-files-found: error
+          retention-days: 30

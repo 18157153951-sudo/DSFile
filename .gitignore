@@ -1,0 +1,11 @@
+# Xcode / XcodeGen
+DSFile/DSFile.xcodeproj/
+DSFile/build/
+DSFile/Payload/
+DSFile/*.ipa
+*.xcuserstate
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
