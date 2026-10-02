@@ -22,8 +22,11 @@
 1. 去掉了 `Tweak.m`（那是给 Filza 做注入用的 hooks，DSFile 不需要）。
 2. 去掉了 `kpf/`、`XPF/`、`ChOma`（`xpf_*` / `grab_kernelcache` 在这条逃逸路径上根本没有被调用，
    删掉可以显著降低编译面和二进制体积）。
-3. 新增 `Shims/`：`sys/fileport.h` 与 `IOSurface/IOSurfaceRef.h` 的兼容声明 +
-   `DSIOShim.c`（用 `dlopen`/`dlsym` 绑定 IOSurface，避免依赖私有 framework 能否链接）。
+3. 新增 `Shims/sys/fileport.h`：XNU 的 `bsd/sys/fileport.h` 不在公开 iOS SDK 里，
+   而 `fileport_makeport` / `fileport_makefd` 是 libsystem 导出的真符号，这里只补声明。
+   `IOSurface` 不需要补：SDK 自带 `IOSurface.framework`（含头文件与 module map），
+   工程里直接 `-framework IOSurface` 链接即可（早期版本用过 dlopen 垫片，
+   会和 SDK 真实头文件冲突，已删除）。
 4. 未改动任何逃逸 / 内核读写逻辑本身。
 
 ## 风险

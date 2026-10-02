@@ -65,7 +65,8 @@ final class KernelCenter: ObservableObject {
 
     private init() {
         let stored = UserDefaults.standard.object(forKey: KernelCenter.autoActivateKey) as? Bool
-        autoActivate = stored ?? true
+        // 默认不自动跑内核漏洞：必须在设置页手动点「激活」，或自己把开关打开
+        autoActivate = stored ?? false
         refresh()
     }
 
