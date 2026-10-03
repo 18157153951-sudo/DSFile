@@ -60,12 +60,12 @@ jobs:
               echo "❌ 缺少 $SYMBOL"; echo "$SYMS" | head -40; exit 1
             fi
           done
-          echo "== 确认替换向导真的被编进来了（按向导专属文案找） =="
-          for TEXT in '添加目标文件' '多出来的文件' '一键回滚'; do
-            if strings -a "$DYLIB" | grep -q "$TEXT"; then
-              echo "✅ 含向导文案：$TEXT"
+          echo "== 确认替换向导真的被编进来了（grep 二进制：strings 会跳过非 ASCII，所以直接用 grep -a） =="
+          for TEXT in 'ReplaceWizardView' 'ReplaceWizardModel' 'TargetFileBrowser' 'myfilza-inject.log' 'AutoTasks'; do
+            if grep -a -q "$TEXT" "$DYLIB"; then
+              echo "✅ 含向导标识：$TEXT"
             else
-              echo "❌ 找不到向导文案：$TEXT"; exit 1
+              echo "❌ 找不到向导标识：$TEXT"; exit 1
             fi
           done
           echo "== 确认没有内核代码被带进来（应为空） =="
