@@ -1479,39 +1479,55 @@ struct ReplaceWizardView: View {
             } message: {
                 Text("替换目标 App 里的文件需要先获得沙盒外写入权限：请到「设置」页点『激活内核访问』。")
             }
-            .onAppear {
-                guard !loaded else { return }
-                loaded = true
-                model.reloadInbox()
-                model.reloadFolders()
-                model.reloadBundleFiles()
-                model.reloadBundleFolder()
-                model.reloadSavedTasks()
-                model.loadAppsIfNeeded()
-                model.append("提示：每次替换前都会整份备份（文件夹 / 包体模式是整棵递归备份），随时可以在下方或「记录」页一键回滚。", .info)
-            }
+            .onAppear { handleFirstAppear() }
             .onReceive(NotificationCenter.default.publisher(for: ReplaceTaskRunner.didRunNotification)) { note in
-                let success = (note.userInfo?["success"] as? Bool) ?? false
-                let summary = (note.userInfo?["summary"] as? String) ?? ""
-                RunStore.shared.reload()
-                model.reloadSavedTasks()
-                let stateText: String = success ? "成功" : "未成功"
-                let stateLevel: ReplaceWizardModel.LogLine.Level = success ? .success : .warning
-                model.append("替换任务：\(stateText) · \(summary)", stateLevel)
+                handleTaskRunNotification(note)
             }
             .onReceive(NotificationCenter.default.publisher(for: .myfilzaFileSystemAccessChanged)) { _ in
-                // 激活成功 / 提权成功：权限变了，之前那次「没权限」的扫描结果必须作废重扫
-                model.append("文件系统权限已变化：正在重新扫描 App 列表…", .info)
-                model.loadApps(force: true)
+                handleFileSystemAccessChanged()
             }
             .onChange(of: model.needsActivation) { needs in
-                if needs {
-                    activationAlert = true
-                    model.needsActivation = false
-                }
+                handleNeedsActivationChanged(needs)
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    // MARK: 生命周期与通知（拆成独立方法，避免视图构建器类型检查超时）
+
+    private func handleFirstAppear() {
+        guard !loaded else { return }
+        loaded = true
+        model.reloadInbox()
+        model.reloadFolders()
+        model.reloadBundleFiles()
+        model.reloadBundleFolder()
+        model.reloadSavedTasks()
+        model.loadAppsIfNeeded()
+        model.append("提示：每次替换前都会整份备份（文件夹 / 包体模式是整棵递归备份），随时可以在下方或「记录」页一键回滚。", .info)
+    }
+
+    private func handleTaskRunNotification(_ note: Notification) {
+        let success = (note.userInfo?["success"] as? Bool) ?? false
+        let summary = (note.userInfo?["summary"] as? String) ?? ""
+        RunStore.shared.reload()
+        model.reloadSavedTasks()
+        let stateText: String = success ? "成功" : "未成功"
+        let stateLevel: ReplaceWizardModel.LogLine.Level = success ? .success : .warning
+        model.append("替换任务：\(stateText) · \(summary)", stateLevel)
+    }
+
+    private func handleFileSystemAccessChanged() {
+        // 激活成功 / 提权成功：权限变了，之前那次「没权限」的扫描结果必须作废重扫
+        model.append("文件系统权限已变化：正在重新扫描 App 列表…", .info)
+        model.loadApps(force: true)
+    }
+
+    private func handleNeedsActivationChanged(_ needs: Bool) {
+        if needs {
+            activationAlert = true
+            model.needsActivation = false
+        }
     }
 
     // MARK: 模式
