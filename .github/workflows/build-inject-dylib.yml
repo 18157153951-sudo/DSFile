@@ -1,0 +1,78 @@
+name: Build Inject Dylib
+
+on:
+  push:
+    branches: [inject-dylib]
+    paths:
+      - 'InjectDylib/**'
+      - '.github/workflows/build-inject-dylib.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        working-directory: InjectDylib
+        run: xcodegen generate
+
+      - name: 编译 dylib（不签名）
+        working-directory: InjectDylib
+        run: |
+          xcodebuild build \
+            -project MyfilzaReplace.xcodeproj \
+            -target MyfilzaReplace \
+            -configuration Release \
+            -sdk iphoneos \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            COPY_PHASE_STRIP=NO \
+            STRIP_INSTALLED_PRODUCT=NO
+
+      - name: 确认产物与关键符号
+        working-directory: InjectDylib
+        run: |
+          DYLIB=build/Release-iphoneos/MyfilzaReplace.dylib
+          ls -lh "$DYLIB"
+          echo "== 架构 =="
+          lipo -info "$DYLIB"
+          echo "== 依赖（应只有系统库） =="
+          otool -L "$DYLIB"
+          echo "== 关键符号 =="
+          for SYMBOL in _MyfilzaReplaceDylibInit _OBJC_CLASS_\$_MyfilzaReplaceLauncher _OBJC_CLASS_\$_DSKernel _OBJC_CLASS_\$_DSPickers; do
+            if nm -gU "$DYLIB" 2>/dev/null | grep -q "$SYMBOL"; then
+              echo "✅ 找到 $SYMBOL"
+            else
+              echo "❌ 缺少 $SYMBOL"
+              nm -gU "$DYLIB" 2>/dev/null | head -60
+              exit 1
+            fi
+          done
+          echo "== 确认没有内核代码被带进来（应全部为空） =="
+          nm -gU "$DYLIB" 2>/dev/null | grep -E 'kexploit|early_kread|DSCredEscape|DS3105|clearsword' || echo "（无内核符号，符合预期）"
+
+      - name: 计算校验值并打包
+        working-directory: InjectDylib
+        run: |
+          DYLIB=build/Release-iphoneos/MyfilzaReplace.dylib
+          echo "SHA256: $(shasum -a 256 "$DYLIB" | awk '{print $1}')"
+          mkdir -p out
+          cp "$DYLIB" out/MyfilzaReplace.dylib
+
+      - name: 上传 dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyfilzaReplace-dylib
+          path: InjectDylib/out/MyfilzaReplace.dylib
+          if-no-files-found: error
+          retention-days: 30

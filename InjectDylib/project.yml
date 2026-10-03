@@ -1,0 +1,61 @@
+name: MyfilzaReplace
+
+options:
+  bundleIdPrefix: com.myfilza
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  MyfilzaReplace:
+    # 把「替换向导」编成动态库，供 eSign / Sideloadly 注入到宿主 App（3105）。
+    # 注入后代码运行在已经有容器访问权限的宿主进程里 → 不需要内核漏洞、不需要沙盒逃逸。
+    type: library.dynamic
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_NAME: MyfilzaReplace
+        PRODUCT_MODULE_NAME: MyfilzaReplace
+        PRODUCT_BUNDLE_IDENTIFIER: com.myfilza.replace
+        # 注入用：不签名，签名交给 eSign / Sideloadly
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        ARCHS: arm64
+        ONLY_ACTIVE_ARCH: NO
+        SKIP_INSTALL: YES
+        GENERATE_INFOPLIST_FILE: YES
+        ENABLE_BITCODE: NO
+        CLANG_ENABLE_OBJC_ARC: YES
+        CLANG_ENABLE_MODULES: YES
+        SWIFT_VERSION: "5.0"
+        GCC_C_LANGUAGE_STANDARD: gnu11
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/MyfilzaReplace-Bridging-Header.h
+        # ObjC 的 constructor 要能 import 到 Swift 生成的接口头
+        SWIFT_INSTALL_OBJC_HEADER: YES
+        SWIFT_OBJC_INTERFACE_HEADER_NAME: MyfilzaReplace-Swift.h
+        DEFINES_MODULE: YES
+        LD_DYLIB_INSTALL_NAME: "@executable_path/Frameworks/MyfilzaReplace.dylib"
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/Sources
+          - $(SRCROOT)/Sources/Core
+          - $(SRCROOT)/Sources/Files
+          - $(SRCROOT)/Sources/Replace
+          - $(SRCROOT)/Sources/Scripts
+        OTHER_CFLAGS:
+          - -I$(SRCROOT)/Sources
+          - -I$(SRCROOT)/Sources/Core
+          - -Wno-unused-function
+          - -Wno-unused-variable
+          - -Wno-unused-but-set-variable
+          - -Wno-deprecated-declarations
+          - -Wno-format
+        OTHER_LDFLAGS:
+          - -framework
+          - UIKit
+          - -framework
+          - SwiftUI
+          - -framework
+          - Foundation
