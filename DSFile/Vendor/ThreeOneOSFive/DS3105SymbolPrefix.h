@@ -5,13 +5,15 @@
  * 3105 后端符号前缀。
  *
  * 3105 自带一份与现有 FilzaJailedDS 后端同名的 kexploit/krw 实现（kexploit_opa334、kread64、early_kread64…），
- * 两者必须共存于同一个可执行文件，所以把 3105 侧的所有自有符号统一改名为 t3105_*。
+ * 两者必须共存于同一个可执行文件，所以把 3105 侧**自己实现**的符号统一改名为 t3105_*。
  *
  * 只通过 XcodeGen 的文件级 compilerFlags（-include）作用于 Vendor/ThreeOneOSFive 下的源文件，
  * 绝不进入现有后端；3105 源码本身逐字节未改。
  *
- * 生成方式：从 3105 头文件声明 + 源文件**列 0** 定义中提取导出符号（缩进的局部变量不取），
- * 再并入首次构建时 CI 实际报过的重复符号，最后剔除 C 类型名与 libc 符号。
+ * 生成规则（三次 CI 迭代后定型）：
+ *   1. 只取 3105 源文件里**列 0 定义**的符号（缩进的局部变量不取，extern 声明行跳过）；
+ *   2. 头文件里只有声明、源码里没有定义的一律视为系统 API（IOSurfacePrefetchPages、mach_vm_*、VM_* 等），**不改名**；
+ *   3. 再并入 CI 实测报过的重复符号（含 kread64/kwrite64 这类与现有后端同名的），最后剔除 C 类型名与系统 API 前缀。
  */
 
 #define amfi_cslot_get t3105_amfi_cslot_get
@@ -57,7 +59,6 @@
 #define init_globals t3105_init_globals
 #define init_target_file t3105_init_target_file
 #define initialize_physical_read_write t3105_initialize_physical_read_write
-#define IOSurfacePrefetchPages t3105_IOSurfacePrefetchPages
 #define ipc_entry_lookup t3105_ipc_entry_lookup
 #define is_kaddr_valid t3105_is_kaddr_valid
 #define is_pac_supported t3105_is_pac_supported
@@ -81,9 +82,6 @@
 #define kwrite8 t3105_kwrite8
 #define kwritebuf t3105_kwritebuf
 #define label_get_sandbox t3105_label_get_sandbox
-#define mach_vm_allocate t3105_mach_vm_allocate
-#define mach_vm_deallocate t3105_mach_vm_deallocate
-#define mach_vm_map t3105_mach_vm_map
 #define MCMActivateContainer t3105_MCMActivateContainer
 #define MCMActivateContainerPath t3105_MCMActivateContainerPath
 #define MCMBridgeAvailable t3105_MCMBridgeAvailable
@@ -182,7 +180,6 @@
 #define proc_find t3105_proc_find
 #define proc_find_by_name t3105_proc_find_by_name
 #define proc_get_cred_label t3105_proc_get_cred_label
-#define proc_get_p_name t3105_proc_get_p_name
 #define proc_name t3105_proc_name
 #define proc_self t3105_proc_self
 #define proc_task t3105_proc_task
@@ -222,10 +219,7 @@
 #define thread_get_task t3105_thread_get_task
 #define thread_set_mutex t3105_thread_set_mutex
 #define thread_set_options t3105_thread_set_options
-#define VM_MAX_KERNEL_ADDRESS t3105_VM_MAX_KERNEL_ADDRESS
-#define VM_MIN_KERNEL_ADDRESS t3105_VM_MIN_KERNEL_ADDRESS
 #define vnode_get_child_vnode t3105_vnode_get_child_vnode
-#define vnode_get_v_name t3105_vnode_get_v_name
 #define vnode_redirect_file t3105_vnode_redirect_file
 #define vnode_redirect_folder t3105_vnode_redirect_folder
 #define vnode_unredirect_file t3105_vnode_unredirect_file
