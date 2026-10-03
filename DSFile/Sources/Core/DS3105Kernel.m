@@ -40,6 +40,9 @@ NSString * const DSKernelBackendValue3105   = @"3105";
 static BOOL      g3105Ready      = NO;
 static NSString *g3105LastStage  = @"未开始";
 
+/// 前置声明：下面的「纯用户态令牌」实现会先调用它（定义在文件稍后）
+static BOOL ds3105_probe_write(void);
+
 BOOL DS3105KernelAvailable(void) { return YES; }
 BOOL DS3105KernelIsReady(void)   { return g3105Ready; }
 NSString *DS3105KernelLastStage(void) { return g3105LastStage; }
