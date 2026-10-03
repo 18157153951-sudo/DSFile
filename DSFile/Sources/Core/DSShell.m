@@ -84,7 +84,7 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
         NSString *bundleRoot = @"/var/containers/Bundle/Application";
         NSArray<NSString *> *entries = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundleRoot error:nil];
         for (NSString *entry in entries) {
-            if (![entry hasPrefix:@".jbroot-"]) { continue }
+            if (![entry hasPrefix:@".jbroot-"]) { continue; }
             NSString *path = [[bundleRoot stringByAppendingPathComponent:entry] stringByAppendingPathComponent:@"bin/sh"];
             if (access(path.fileSystemRepresentation, X_OK) == 0) {
                 cached = path;
