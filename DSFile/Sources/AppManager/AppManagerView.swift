@@ -58,7 +58,11 @@ struct AppManagerView: View {
         if isLoading {
             loadingState
         } else if apps.isEmpty {
-            hasAccess ? emptyState : noAccessState
+            if hasAccess {
+                emptyState
+            } else {
+                noAccessState
+            }
         } else if filtered.isEmpty {
             noMatchState
         } else {
