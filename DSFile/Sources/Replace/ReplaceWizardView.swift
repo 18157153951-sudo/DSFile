@@ -1280,25 +1280,8 @@ struct ReplaceWizardView: View {
 
     var body: some View {
         NavigationView {
-            Form {
-                modeSection
-                targetSection
-                switch model.mode {
-                case .files:
-                    fileSection
-                case .folders:
-                    folderSection
-                case .bundle:
-                    bundleSection
-                }
-                runSection
-                savedTasksSection
-                resultSection
-                recentSection
-                logSection
-            }
-            .listStyle(.insetGrouped)
-            .navigationTitle("替换")
+            mainForm
+                .navigationTitle("替换")
             // 应用管理器里点「设为替换页目标 App」：这里接住那次请求并选中
             .onReceive(ReplaceTargetBus.shared.$pendingBundleId) { bundleId in
                 guard let bundleId = bundleId, !bundleId.isEmpty else { return }
@@ -1525,6 +1508,35 @@ struct ReplaceWizardView: View {
     }
 
     // MARK: 模式
+
+    /// 替换页主体表单。抽出来是为了给 body 减负——整段 body（Form + 一长串 .sheet 修饰符）
+    /// 会让 Swift 的类型检查超时，报 "unable to type-check this expression in reasonable time"。
+    private var mainForm: some View {
+        Form {
+            modeSection
+            targetSection
+            modeSections
+            runSection
+            savedTasksSection
+            resultSection
+            recentSection
+            logSection
+        }
+        .listStyle(.insetGrouped)
+    }
+
+    /// 当前模式对应的绑定区（文件 / 文件夹 / 包体）。
+    @ViewBuilder
+    private var modeSections: some View {
+        switch model.mode {
+        case .files:
+            fileSection
+        case .folders:
+            folderSection
+        case .bundle:
+            bundleSection
+        }
+    }
 
     /// 工具栏「+」：按当前模式走对应的导入入口。
     /// 单独抽成方法是为了给 SwiftUI 的 body 减负——整段 body 表达式过于复杂时，
