@@ -64,7 +64,7 @@ final class BrowserModel: ObservableObject {
         // 只做隐式过渡（行内容变化照样有动画），行为零变化。
         if let path = path {
             let goingForward = path.count > currentPath.count && path.hasPrefix(currentPath)
-            withAnimation(.easeInOut(duration: 0.22)) {
+            withAnimation(.easeOut(duration: 0.18)) {
                 currentPath = path
                 navDirection = goingForward ? .forward : .backward
             }
@@ -289,13 +289,10 @@ struct FilesView: View {
             }
         }
         .padding(.bottom, 6)
-        // 路径栏跟着目录切换一起滑动 + 淡入淡出。
+        // 路径栏跟着目录切换做**淡入淡出**（不做全宽位移：位移 + 异步加载观感更差）。
         // 只给这条「没有内部状态」的路径栏换标识，安全；列表本身保持 identity 不变。
         .id(browser.currentPath)
-        .transition(.asymmetric(
-            insertion: .move(edge: browser.navDirection == .forward ? .trailing : .leading).combined(with: .opacity),
-            removal: .move(edge: browser.navDirection == .forward ? .leading : .trailing).combined(with: .opacity)
-        ))
+        .transition(.opacity)
     }
 
     private var filterBar: some View {
@@ -369,7 +366,7 @@ struct FilesView: View {
         }
         .listStyle(.insetGrouped)
         // 目录切换时列表内容的变化也跟着动画（行为不变，只是把突变变成 0.22s 的过渡）
-        .animation(.easeInOut(duration: 0.22), value: browser.currentPath)
+        .animation(.easeOut(duration: 0.18), value: browser.currentPath)
         .refreshable {
             browser.reload()
         }

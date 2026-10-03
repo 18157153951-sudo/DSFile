@@ -99,10 +99,8 @@ struct TargetFileBrowserSheet: View {
                             .font(.system(.caption2, design: .monospaced))
                         Text("右上角「选择此文件夹」= 把**当前所在目录**当成目标；在根目录按它就是整个\(rootMode.title)。")
                             .foregroundColor(.orange)
-                        if pickFolders {
-                            Text("进到想替换的那个文件夹里，再点右上角「选择此文件夹」。")
-                                .foregroundColor(.orange)
-                        }
+                        Text("三种模式都支持：文件模式会新增一条「文件夹绑定」（整目录镜像替换 + 递归备份）；文件夹 / 包体模式会直接绑到当前源文件夹。")
+                            .foregroundColor(.secondary)
                         if let hint = folderPickHint {
                             Text(hint)
                                 .foregroundColor(.secondary)
@@ -170,14 +168,18 @@ struct TargetFileBrowserSheet: View {
                         Text("当前位置（相对\(rootMode.title)）")
                     }
 
+                    // 加载时**保留旧内容**，只在上面加一行小进度提示。
+                    // 之前是把整段列表换成转圈，切换目录时会闪出半屏空白，观感很差。
                     if isLoading {
                         HStack(spacing: 8) {
                             ProgressView()
-                            Text("正在读取…")
+                            Text(items.isEmpty ? "正在读取…" : "正在读取…")
                                 .font(.footnote)
                                 .foregroundColor(.secondary)
                         }
-                    } else if let errorText = errorText {
+                    }
+
+                    if let errorText = errorText, items.isEmpty {
                         HStack(spacing: 12) {
                             Image(systemName: "xmark.octagon.fill")
                                 .font(.title3)
@@ -187,27 +189,26 @@ struct TargetFileBrowserSheet: View {
                                 .font(.footnote)
                                 .foregroundColor(.secondary)
                         }
-                    } else if items.isEmpty {
+                    }
+
+                    if items.isEmpty && !isLoading && errorText == nil {
                         Text("这个目录是空的")
                             .font(.footnote)
                             .foregroundColor(.secondary)
-                    } else {
-                        // 目录切换过渡动画：进入子目录从右侧滑入、返回上级从左侧滑入，都带淡入淡出。
-                        // .id(currentPath) 让 SwiftUI 把这批行当成「新内容」，从而走下面的 transition。
-                        ForEach(items) { item in
-                            Button {
-                                handle(item)
-                            } label: {
-                                browserRow(item)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .transition(.asymmetric(
-                            insertion: .move(edge: navDirection == .forward ? .trailing : .leading).combined(with: .opacity),
-                            removal: .move(edge: navDirection == .forward ? .leading : .trailing).combined(with: .opacity)
-                        ))
-                        .id(currentPath)
                     }
+
+                    // 目录切换只做**淡入淡出**（不做全宽位移）：位移 + 异步加载容易闪/顿，观感更差；
+                    // 纯淡入淡出在 iOS 15 上最稳。.id(currentPath) 让 SwiftUI 把这批行当成新内容走 transition。
+                    ForEach(items) { item in
+                        Button {
+                            handle(item)
+                        } label: {
+                            browserRow(item)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .transition(.opacity)
+                    .id(currentPath)
 
                     if allowsMultipleSelection && isSelecting {
                         Button {
@@ -269,10 +270,10 @@ struct TargetFileBrowserSheet: View {
                     }
                 }
             }
-            .animation(.easeInOut(duration: 0.22), value: currentPath)
+            .animation(.easeOut(duration: 0.18), value: currentPath)
             .onAppear(perform: prepare)
             .onChange(of: rootMode) { _ in
-                withAnimation(.easeInOut(duration: 0.22)) {
+                withAnimation(.easeOut(duration: 0.18)) {
                     navDirection = .backward
                     currentPath = rootPath
                 }
@@ -355,13 +356,12 @@ struct TargetFileBrowserSheet: View {
         (allowsMultipleSelection && isSelecting) ? "用此文件夹" : "选择此文件夹"
     }
 
-    /// 能不能把「当前所在目录」当作目标：
-    /// 传了 onPickFolder、或 pickFolders = true 时才可以；否则按钮禁用（原因写在 footer 的 folderPickHint 里）。
+    /// 能不能把「当前所在目录」当作目标。
+    /// 现在三种模式（文件 / 文件夹 / 包体）都支持「选文件夹」，所以只要读得到目录、路径非空就可用。
     private var canConfirmFolder: Bool {
         guard hasFileAccess else { return false }
         let path = currentPath.isEmpty ? rootPath : currentPath
-        guard !path.isEmpty else { return false }
-        return onPickFolder != nil || pickFolders
+        return !path.isEmpty
     }
 
     private func prepare() {
@@ -396,7 +396,7 @@ struct TargetFileBrowserSheet: View {
 
     private func handle(_ item: PathItem) {
         if item.isDirectory && !item.isSymlink {
-            withAnimation(.easeInOut(duration: 0.22)) {
+            withAnimation(.easeOut(duration: 0.18)) {
                 navDirection = .forward
                 currentPath = item.path
             }
@@ -422,7 +422,7 @@ struct TargetFileBrowserSheet: View {
     private func goUp() {
         guard currentPath != rootPath, let parent = FileSystemService.parent(of: currentPath) else { return }
         let target = parent.count < rootPath.count ? rootPath : parent
-        withAnimation(.easeInOut(duration: 0.22)) {
+        withAnimation(.easeOut(duration: 0.18)) {
             navDirection = .backward
             currentPath = target
         }

@@ -717,7 +717,7 @@ final class ReplaceWizardModel: ObservableObject {
     /// 包体模式：导入一个源文件夹（整包换 / 并入）
     /// 文件夹**不能** asCopy:YES（UIKit 会抛异常），所以走「选完由 DSPickers 拷进沙盒」的入口；
     /// 大文件夹（例如整个 .app）拷贝要花点时间，界面会短暂无反应，属正常。
-    func importBundleFolder() {
+    func importBundleFolder(thenBindTo target: String? = nil) {
         withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerCopying(into: URL(fileURLWithPath: self.folderSourceDirectory),
                                                                            completion: { copied, error in
             if let error = error {
@@ -729,6 +729,10 @@ final class ReplaceWizardModel: ObservableObject {
             }
             self.append("已导入源文件夹 \(copied.lastPathComponent)", .success)
             self.reloadBundleFolder(preferred: copied.path)
+            // 调用方给了目标（用户在浏览器里点了「选择此文件夹」）→ 选完源文件夹立刻绑上
+            if let target = target, !target.isEmpty {
+                self.setBundleFolderTarget(path: target)
+            }
             self.markDirty()
         }, cancel: nil) }
     }
@@ -751,7 +755,10 @@ final class ReplaceWizardModel: ObservableObject {
 
     func setBundleFolderTarget(path: String) {
         guard var folder = bundleFolder else {
-            append("还没有源文件夹：请先点「添加源文件夹」，再用「选择此文件夹」指定它在 .app 里的目标。", .warning)
+            // 还没有源文件夹：不弹提示挡路，直接进入「选源文件夹」流程，选完自动绑到这个目标
+            let target = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            append("还没有源文件夹：先选一个本机源文件夹，选完自动绑定到 \(target)", .info)
+            importBundleFolder(thenBindTo: target)
             return
         }
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -816,6 +823,34 @@ final class ReplaceWizardModel: ObservableObject {
             }
             self.append("已导入文件夹 \(copied.lastPathComponent)", .success)
             self.reloadFolders()
+            self.markDirty()
+        }, cancel: nil) }
+    }
+
+    /// 文件模式下的「文件夹绑定」：把刚在目标 App 目录里选中的那个文件夹当目标，
+    /// 紧接着让用户选本机源文件夹。用户取消选择源时什么都不加，列表保持干净。
+    func addFileFolderBinding(targetPath: String) {
+        let target = targetPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        append("已选中目标文件夹：\(target)，接着选择本机源文件夹…", .info)
+        withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerCopying(into: URL(fileURLWithPath: self.folderSourceDirectory),
+                                                                           completion: { copied, error in
+            if let error = error {
+                self.append("导入文件夹失败：\(error.localizedDescription)", .error)
+            }
+            guard let copied = copied else {
+                if error == nil {
+                    self.append("已取消：没有绑定文件夹（目标未改动）", .warning)
+                }
+                return
+            }
+            var folder = WizardFolder(localPath: copied.path, name: copied.lastPathComponent)
+            let stats = Self.folderStats(copied.path)
+            folder.itemCount = stats.count
+            folder.sizeText = Self.sizeText(stats.size)
+            folder.targetPath = target
+            self.folders.append(folder)
+            self.append("文件夹绑定：\(copied.lastPathComponent) → \(target)", .success)
             self.markDirty()
         }, cancel: nil) }
     }
@@ -1061,11 +1096,13 @@ final class ReplaceWizardModel: ObservableObject {
             return
         }
 
-        let task = currentTask(forceBackup: mode != .files)
+        // 文件夹绑定是「镜像替换」（会删掉目标里多余的旧文件），所以只要任务里有文件夹就强制备份
+        let forceBackup = mode != .files || !folders.isEmpty
+        let task = currentTask(forceBackup: forceBackup)
         guard !task.isEmpty else {
             switch mode {
             case .files:
-                append("还没有可替换的条目：每个文件都要先绑定一个目标路径", .error)
+                append("还没有可替换的条目：加一个本机文件并绑定目标路径，或在目标浏览器里用「选择此文件夹」加一条文件夹绑定", .error)
             case .folders:
                 append("还没有可替换的文件夹：每个源文件夹都要先绑定一个目标文件夹", .error)
             case .bundle:
@@ -1334,7 +1371,7 @@ struct ReplaceWizardView: View {
                 TargetFileBrowserSheet(app: request.app,
                                        localFileName: request.file.name,
                                        initialTarget: request.file.targetPath,
-                                       folderPickHint: Self.folderPickHintForFileMode) { path in
+                                       onPickFolder: pickFileFolderTarget) { path in
                     model.setTarget(path: path, for: request.file.id, manual: true)
                     browserRequest = nil
                 }
@@ -1400,8 +1437,7 @@ struct ReplaceWizardView: View {
                                        initialTarget: nil,
                                        lockedRoot: request.inBundle ? request.app.bundlePath : nil,
                                        allowsMultipleSelection: true,
-                                       onPickFolder: request.inBundle ? pickBundleFolderTarget : nil,
-                                       folderPickHint: request.inBundle ? nil : Self.folderPickHintForFileMode,
+                                       onPickFolder: request.inBundle ? pickBundleFolderTarget : pickFileFolderTarget,
                                        onPickMany: { paths in
                                            let unmatched = model.addTargets(paths, inBundle: request.inBundle)
                                            targetFirstRequest = nil
@@ -1597,13 +1633,15 @@ struct ReplaceWizardView: View {
         }
     }
 
-    /// 文件模式只能选文件：右上角「选择此文件夹」会禁用，原因写在浏览器 footer 里
-    private static let folderPickHintForFileMode =
-        "文件模式只能选文件；要替换整个文件夹，请切到「文件夹模式」或「包体(.app)模式」。"
-
     /// 目标浏览器右上角「选择此文件夹」→ 把当前所在目录设成包体源文件夹的目标
     private func pickBundleFolderTarget(_ path: String) {
         model.setBundleFolderTarget(path: path)
+    }
+
+    /// 目标浏览器右上角「选择此文件夹」（文件模式）→ 新增一条文件夹绑定（整目录镜像替换），
+    /// 紧接着弹本机文件夹选择器让用户指定源；用户取消就什么都不加。
+    private func pickFileFolderTarget(_ path: String) {
+        model.addFileFolderBinding(targetPath: path)
     }
 
     /// 工具栏「+」：按当前模式走对应的导入入口。
@@ -1841,6 +1879,34 @@ struct ReplaceWizardView: View {
                 model.removeFiles(at: offsets)
             }
 
+            // 文件模式下的「文件夹绑定」（整目录镜像替换）：由目标浏览器右上角「选择此文件夹」创建。
+            // 与文件夹模式共用同一份 folders 列表，语义一致（替换前整棵递归备份）。
+            ForEach(model.folders) { folder in
+                Button {
+                    openFolderBrowser(for: folder)
+                } label: {
+                    FolderRow(folder: folder)
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button {
+                        openFolderBrowser(for: folder)
+                    } label: {
+                        Label("重新选择目标文件夹", systemImage: "folder")
+                    }
+                    Button {
+                        model.clearFolderTarget(for: folder.id)
+                    } label: {
+                        Label("清除绑定", systemImage: "xmark.circle")
+                    }
+                    Button(role: .destructive) {
+                        model.removeFolder(id: folder.id)
+                    } label: {
+                        Label("从列表移除", systemImage: "trash")
+                    }
+                }
+            }
+
             Button {
                 openTargetFirst(inBundle: false)
             } label: {
@@ -1853,9 +1919,9 @@ struct ReplaceWizardView: View {
                 Label("添加本机文件（按名自动匹配目标）", systemImage: "square.and.arrow.down")
             }
         } header: {
-            Text("替换文件（目标优先 / 本机优先）")
+            Text("替换文件 / 文件夹（目标优先 / 本机优先）")
         } footer: {
-            Text("目标优先：先点「添加目标文件」在目标 App 数据容器里挑出要替换掉的文件，App 会自动在本机找同名文件配上（同名多处会让你选，一个都没有会弹本机选择器）；这样绑定的目标路径会被**锁定**，不会被自动匹配改掉。本机优先：点「添加本机文件」，再按文件名自动匹配目标。左滑从列表移除（文件本体留在 ReplaceInbox）。")
+            Text("目标优先：先点「添加目标文件」在目标 App 数据容器里挑出要替换掉的文件，App 会自动在本机找同名文件配上（同名多处会让你选，一个都没有会弹本机选择器）；这样绑定的目标路径会被**锁定**，不会被自动匹配改掉。本机优先：点「添加本机文件」，再按文件名自动匹配目标。**要替换整个文件夹**：在目标浏览器里进到那个文件夹，点右上角「选择此文件夹」→ 接着选本机源文件夹即可（镜像替换 + 递归备份，与文件夹模式同一套）。左滑从列表移除（文件本体留在 ReplaceInbox）。")
         }
     }
 

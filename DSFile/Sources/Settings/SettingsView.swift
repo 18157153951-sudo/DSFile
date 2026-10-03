@@ -43,11 +43,18 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.8"
+    private static let appVersion = "0.3.9"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.9", date: "2026-10-03", items: [
+            "**三种模式都能选文件夹了**：文件模式里在目标浏览器进到某个文件夹后点右上角「选择此文件夹」，会新增一条「文件夹绑定」（整目录镜像替换 + 递归备份），紧接着弹本机选择器让你挑源文件夹；取消就什么都不加",
+            "包体模式还没添加源文件夹时按「选择此文件夹」，现在会**直接进入选源文件夹的流程**并自动绑到你刚选的目标（不再只弹一句提示）",
+            "**过渡动画重做**：去掉全宽位移（位移 + 异步加载容易闪/顿），改成克制的**淡入淡出**（0.18 秒 easeOut），目标浏览器与「文件」页都生效",
+            "切换目录时**不再把列表换成转圈**（那会闪出半屏空白），现在保留上一级内容、只在上面显示一行「正在读取…」",
+            "修复：文件模式里「选择此文件夹」原本被置灰不可用"
+        ]),
         ChangeEntry(version: "0.3.8", date: "2026-10-03", items: [
             "目录浏览器右上角现在**始终有「选择此文件夹」**：在包体(.app)模式里进到某一层文件夹按它，就直接把**这个文件夹**当成目标（在根目录按 = 整个 .app）；文件夹模式同样可用",
             "文件模式只能选文件时，这个按钮会置灰并在下方写明原因，不会再让人以为坏了",

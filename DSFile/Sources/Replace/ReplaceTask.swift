@@ -125,7 +125,8 @@ struct ReplaceAutoTask: Codable, Hashable {
 
     var itemCount: Int {
         switch mode {
-        case .files: return files.count
+        // 文件模式也允许「文件夹绑定」（整目录镜像替换），所以两边条目都要算上
+        case .files: return files.count + folders.count
         case .folders: return folders.count
         case .bundle: return files.count + (folders.isEmpty ? 0 : 1)
         }
@@ -315,7 +316,8 @@ enum ReplaceTaskBuilder {
                                            optional: false))
         }
 
-        if task.mode == .folders {
+        if task.mode == .folders || task.mode == .files {
+            // 文件模式里的「文件夹绑定」与文件夹模式语义一致：整目录镜像替换（替换前递归备份）
             for binding in task.folders {
                 steps.append(ScriptRecipe.Step(op: "replaceDir",
                                                source: binding.localPath,
@@ -342,7 +344,7 @@ enum ReplaceTaskBuilder {
         let note: String
         switch task.mode {
         case .files:
-            note = "由「替换」页向导生成：每个文件替换前都会整份备份。"
+            note = "由「替换」页向导生成：文件替换前会整份备份；若含文件夹绑定，则按整目录镜像替换并递归备份。"
         case .folders:
             note = "由「替换」页文件夹模式生成：整个目标文件夹会被镜像替换，替换前递归备份。"
         case .bundle:
