@@ -140,13 +140,23 @@ struct ScriptsView: View {
 
     // MARK: - 导入
 
+    /// 导入中转目录：选择器给的是沙盒外 URL（asCopy 已被 UIKit 禁止，见 DSPickers.h 文件头），
+    /// 先让 DSPickers 拷进这里，再交给 ScriptLibrary，避免安全作用域过期后读不到内容。
+    private var importInboxDirectory: String {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? NSTemporaryDirectory()
+        let path = (docs as NSString).appendingPathComponent("ImportInbox")
+        try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        return path
+    }
+
     private func importScriptFiles() {
-        DSPickers.presentOpenPicker(utis: ["public.json", "public.shell-script", "public.plain-text"],
-                                    multiple: true,
-                                    asCopy: true,
-                                    completion: { urls in
+        DSPickers.presentOpenPickerCopying(into: URL(fileURLWithPath: importInboxDirectory),
+                                            utis: ["public.json", "public.shell-script", "public.plain-text"],
+                                        multiple: true,
+                                      completion: { copied, error in
             var failures: [String] = []
-            for url in urls {
+            if let error = error { failures.append("导入：\(error.localizedDescription)") }
+            for url in copied {
                 do {
                     _ = try ScriptLibrary.shared.importFile(at: url, kind: nil)
                 } catch {
@@ -157,14 +167,19 @@ struct ScriptsView: View {
                 importError = failures.joined(separator: "\n")
             }
         },
-                                    cancel: nil)
+                                          cancel: nil)
     }
 
     private func importScriptFolder() {
-        DSPickers.presentFolderPicker(completion: { urls in
-            guard let url = urls.first else { return }
+        DSPickers.presentFolderPickerCopying(into: URL(fileURLWithPath: importInboxDirectory),
+                                          completion: { copied, error in
+            if let error = error {
+                importError = "导入文件夹失败：\(error.localizedDescription)"
+                return
+            }
+            guard let copied = copied else { return }
             do {
-                _ = try ScriptLibrary.shared.importFolder(at: url)
+                _ = try ScriptLibrary.shared.importFolder(at: copied)
             } catch {
                 importError = error.localizedDescription
             }
@@ -704,9 +719,18 @@ struct ScriptDetailView: View {
     }
 
     private func addPayload() {
-        DSPickers.presentOpenPicker(utis: nil, multiple: true, asCopy: true, completion: { urls in
+        // 选择器给的是沙盒外 URL（asCopy 已被 UIKit 禁止）：先拷进中转目录，再交给 ScriptLibrary
+        DSPickers.presentOpenPickerCopying(into: URL(fileURLWithPath: importInboxDirectory),
+                                            utis: nil,
+                                        multiple: true,
+                                      completion: { copied, error in
+            if let error = error {
+                errorText = "导入 payload 失败：\(error.localizedDescription)"
+                if copied.isEmpty { return }
+            }
+            guard !copied.isEmpty else { return }
             do {
-                _ = try library.addPayloadFiles(urls, to: script)
+                _ = try library.addPayloadFiles(copied, to: script)
             } catch {
                 errorText = error.localizedDescription
             }

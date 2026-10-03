@@ -278,27 +278,23 @@ final class ReplaceWizardModel: ObservableObject {
     }
 
     func importFiles() {
-        DSPickers.presentOpenPicker(utis: nil, multiple: true, asCopy: true, completion: { urls in
-            guard !urls.isEmpty else { return }
-            let fm = FileManager.default
-            try? fm.createDirectory(atPath: self.inboxDirectory, withIntermediateDirectories: true)
-
-            var added = 0
-            for url in urls {
-                let destination = self.uniqueInboxPath(for: url.lastPathComponent)
-                do {
-                    if fm.fileExists(atPath: destination) { try fm.removeItem(atPath: destination) }
-                    try fm.copyItem(at: url, to: URL(fileURLWithPath: destination))
-                    added += 1
-                } catch {
-                    self.append("导入失败 \(url.lastPathComponent)：\(error.localizedDescription)", .error)
-                }
+        // asCopy 已被 UIKit 禁止（选中文件夹会抛异常）：统一走「选完拷进沙盒」的入口
+        withPickerSafety("添加文件") { DSPickers.presentOpenPickerCopying(into: URL(fileURLWithPath: self.inboxDirectory),
+                                                                          utis: nil,
+                                                                      multiple: true,
+                                                                    completion: { copied, error in
+            if let error = error {
+                self.append("导入失败：\(error.localizedDescription)", .error)
             }
-            self.append(added > 0 ? "已导入 \(added) 个文件" : "没有导入任何文件", added > 0 ? .success : .warning)
+            guard !copied.isEmpty else {
+                if error == nil { self.append("没有导入任何文件", .warning) }
+                return
+            }
+            self.append("已导入 \(copied.count) 个文件", .success)
             self.reloadInbox()
             self.rematchAll()
             self.markDirty()
-        }, cancel: nil)
+        }, cancel: nil) }
     }
 
     func removeFiles(at offsets: IndexSet) {
@@ -446,28 +442,22 @@ final class ReplaceWizardModel: ObservableObject {
     }
 
     func importBundleFiles() {
-        DSPickers.presentOpenPicker(utis: nil, multiple: true, asCopy: true, completion: { urls in
-            guard !urls.isEmpty else { return }
-            let fm = FileManager.default
-            try? fm.createDirectory(atPath: self.inboxDirectory, withIntermediateDirectories: true)
-
-            var added = 0
-            for url in urls {
-                let destination = self.uniqueInboxPath(for: url.lastPathComponent)
-                do {
-                    if fm.fileExists(atPath: destination) { try fm.removeItem(atPath: destination) }
-                    try fm.copyItem(at: url, to: URL(fileURLWithPath: destination))
-                    added += 1
-                } catch {
-                    self.append("导入失败 \(url.lastPathComponent)：\(error.localizedDescription)", .error)
-                }
+        withPickerSafety("添加文件") { DSPickers.presentOpenPickerCopying(into: URL(fileURLWithPath: self.inboxDirectory),
+                                                                          utis: nil,
+                                                                      multiple: true,
+                                                                    completion: { copied, error in
+            if let error = error {
+                self.append("导入失败：\(error.localizedDescription)", .error)
             }
-            self.append(added > 0 ? "已导入 \(added) 个文件（包体模式）" : "没有导入任何文件",
-                        added > 0 ? .success : .warning)
+            guard !copied.isEmpty else {
+                if error == nil { self.append("没有导入任何文件", .warning) }
+                return
+            }
+            self.append("已导入 \(copied.count) 个文件（包体模式）", .success)
             self.reloadBundleFiles()
             self.rematchBundle()
             self.markDirty()
-        }, cancel: nil)
+        }, cancel: nil) }
     }
 
     /// 在目标 App 的 .app 包里递归找同名文件（唯一命中自动绑定）
@@ -566,19 +556,20 @@ final class ReplaceWizardModel: ObservableObject {
     }
 
     /// 包体模式：导入一个源文件夹（整包换 / 并入）
+    /// 文件夹**不能** asCopy:YES（UIKit 会抛异常），所以走「选完由 DSPickers 拷进沙盒」的入口；
+    /// 大文件夹（例如整个 .app）拷贝要花点时间，界面会短暂无反应，属正常。
     func importBundleFolder() {
-        withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerAsCopy(completion: { urls in
-            guard let url = urls.first else { return }
-            let fm = FileManager.default
-            try? fm.createDirectory(atPath: self.folderSourceDirectory, withIntermediateDirectories: true)
-            let destination = self.uniqueFolderSourcePath(for: url.lastPathComponent)
-            do {
-                try FileOperations.copyDirectoryContents(from: url, to: URL(fileURLWithPath: destination))
-                self.append("已导入源文件夹 \(url.lastPathComponent)", .success)
-            } catch {
-                self.append("导入文件夹失败 \(url.lastPathComponent)：\(error.localizedDescription)", .error)
+        withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerCopying(into: URL(fileURLWithPath: self.folderSourceDirectory),
+                                                                           completion: { copied, error in
+            if let error = error {
+                self.append("导入文件夹失败：\(error.localizedDescription)", .error)
             }
-            self.reloadBundleFolder(preferred: destination)
+            guard let copied = copied else {
+                if error == nil { self.append("没有选择文件夹", .warning) }
+                return
+            }
+            self.append("已导入源文件夹 \(copied.lastPathComponent)", .success)
+            self.reloadBundleFolder(preferred: copied.path)
             self.markDirty()
         }, cancel: nil) }
     }
@@ -652,18 +643,16 @@ final class ReplaceWizardModel: ObservableObject {
     }
 
     func importFolders() {
-        withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerAsCopy(completion: { urls in
-            guard let url = urls.first else { return }
-            let fm = FileManager.default
-            try? fm.createDirectory(atPath: self.folderSourceDirectory, withIntermediateDirectories: true)
-
-            let destination = self.uniqueFolderSourcePath(for: url.lastPathComponent)
-            do {
-                try FileOperations.copyDirectoryContents(from: url, to: URL(fileURLWithPath: destination))
-                self.append("已导入文件夹 \(url.lastPathComponent)", .success)
-            } catch {
-                self.append("导入文件夹失败 \(url.lastPathComponent)：\(error.localizedDescription)", .error)
+        withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerCopying(into: URL(fileURLWithPath: self.folderSourceDirectory),
+                                                                           completion: { copied, error in
+            if let error = error {
+                self.append("导入文件夹失败：\(error.localizedDescription)", .error)
             }
+            guard let copied = copied else {
+                if error == nil { self.append("没有选择文件夹", .warning) }
+                return
+            }
+            self.append("已导入文件夹 \(copied.lastPathComponent)", .success)
             self.reloadFolders()
             self.markDirty()
         }, cancel: nil) }

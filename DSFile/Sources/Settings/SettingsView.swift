@@ -43,11 +43,16 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.5"
+    private static let appVersion = "0.3.6"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.6", date: "2026-10-03", items: [
+            "修复：点「添加源文件夹」会弹出「folder import is not supported, use asCopy:false」并失败——Apple 不允许用 asCopy 选文件夹。现在所有选择器一律 asCopy:NO，改由 App 自己用安全作用域把内容拷进沙盒（iCloud 未下载的文件会先协调下载），失败会给出明确原因",
+            "修复：导入文件 / 导入脚本 / 添加 payload 也一并换成新的导入通道，选中文件夹不会再抛异常",
+            "大文件夹（例如整个 .app）导入时拷贝需要一点时间，界面会短暂无反应，属正常"
+        ]),
         ChangeEntry(version: "0.3.5", date: "2026-10-03", items: [
             "修复：点「添加源文件夹」会把 App 直接搞崩（系统选择器在转场中被重复呈现）。现在所有系统选择器 / 分享面板都从专用宿主排队呈现，出错只会提示并写日志",
             "修复：激活成功后替换页一直显示「获取到 0 个 app」，要先去文件页逛一圈才恢复。现在激活成功会立刻作废缓存并重扫 App 列表",

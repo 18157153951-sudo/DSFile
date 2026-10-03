@@ -272,6 +272,30 @@ static void DSPickerReportFailure(NSString *label, NSException *exception)
     [DSPickerPresenter.shared presentAlertWithTitle:@"打不开系统选择器" message:message];
 }
 
+#pragma mark - 沙盒内拷贝（安全作用域 + iCloud 协调 + 重名自动编号）
+
+/// 在目录里挑一个不冲突的目标名：name、name-1、name-2 …
+static NSURL *DSPickerUniqueDestination(NSURL *directory, NSString *preferredName)
+{
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *name = preferredName.length ? preferredName : @"未命名";
+    NSString *base = name;
+    NSString *extension = @"";
+    if (![name hasPrefix:@"."]) {   // 隐藏文件（.foo）整体当一个名字，不拆扩展名
+        extension = name.pathExtension;
+        if (extension.length) base = [name stringByDeletingPathExtension];
+    }
+    for (NSInteger index = 0; index < 1000; index++) {
+        NSString *candidate = (index == 0)
+            ? name
+            : (extension.length ? [NSString stringWithFormat:@"%@-%ld.%@", base, (long)index, extension]
+                                : [NSString stringWithFormat:@"%@-%ld", base, (long)index]);
+        NSURL *url = [directory URLByAppendingPathComponent:candidate isDirectory:NO];
+        if (![fm fileExistsAtPath:url.path]) return url;
+    }
+    return [directory URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:NO];
+}
+
 #pragma mark - DSPickers
 
 @implementation DSPickers
@@ -332,10 +356,18 @@ static NSArray<UTType *> *DSPickerResolveTypes(NSArray<NSString *> *identifiers)
                        completion:(DSPickerCompletion)completion
                            cancel:(DSPickerCancelHandler)cancel
 {
+    // 真机踩坑：asCopy:YES 时，用户只要选中**文件夹**，UIKit 就会抛
+    // 「folder import is not supported, use asCopy:false」→ 未捕获异常 → SIGABRT。
+    // 所以一律按 asCopy:NO 呈现；拿到的 URL 需要安全作用域，
+    // 请用 presentOpenPickerCopyingInto:（它会把内容拷进沙盒再回调）。
+    if (asCopy) {
+        NSLog(@"[DSPickers] asCopy:YES 已忽略：文件夹不允许 asCopy，统一按 asCopy:NO 呈现");
+    }
+
     [DSPickerPresenter.shared enqueue:^(UIViewController *host) {
         NSArray<UTType *> *types = DSPickerResolveTypes(utiIdentifiers);
         UIDocumentPickerViewController *picker =
-            [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:asCopy];
+            [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types asCopy:NO];
         picker.allowsMultipleSelection = multiple;
         if ([picker respondsToSelector:@selector(setShouldShowFileExtensions:)]) {
             picker.shouldShowFileExtensions = YES;
@@ -359,18 +391,131 @@ static NSArray<UTType *> *DSPickerResolveTypes(NSArray<NSString *> *identifiers)
     } label:@"选择文件夹"];
 }
 
-+ (void)presentFolderPickerAsCopyWithCompletion:(DSPickerCompletion)completion cancel:(DSPickerCancelHandler)cancel
+#pragma mark - 选完直接拷进沙盒（推荐入口）
+
++ (NSArray<NSURL *> *)copyItemsAtURLs:(NSArray<NSURL *> *)urls
+                        intoDirectory:(NSURL *)directory
+                                error:(NSError **)outError
 {
-    [DSPickerPresenter.shared enqueue:^(UIViewController *host) {
-        UIDocumentPickerViewController *picker =
-            [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeFolder ] asCopy:YES];
-        picker.allowsMultipleSelection = NO;
-        if ([picker respondsToSelector:@selector(setShouldShowFileExtensions:)]) {
-            picker.shouldShowFileExtensions = YES;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSError *directoryError = nil;
+    if (![fm createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:&directoryError]) {
+        if (outError) *outError = directoryError;
+        return @[];
+    }
+
+    NSMutableArray<NSURL *> *copied = [NSMutableArray array];
+    NSError *firstError = nil;
+
+    for (NSURL *source in urls) {
+        if (![source isKindOfClass:[NSURL class]]) continue;
+
+        // 选择器给的是沙盒外的 URL：必须开安全作用域，否则 copy 会 EPERM
+        BOOL scoped = NO;
+        @try { scoped = [source startAccessingSecurityScopedResource]; }
+        @catch (__unused NSException *ignored) { scoped = NO; }
+
+        NSError *stepError = nil;
+        NSURL *destination = DSPickerUniqueDestination(directory, source.lastPathComponent);
+
+        @try {
+            // iCloud 未下载 / 需要协调的文件：用 NSFileCoordinator 包一层再拷
+            __block NSError *coordinatorError = nil;
+            __block NSError *copyError = nil;
+            __block BOOL copiedOK = NO;
+
+            NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+            [coordinator coordinateReadingItemAtURL:source
+                                            options:0
+                                              error:&coordinatorError
+                                         byAccessor:^(NSURL *readURL) {
+                copiedOK = [fm copyItemAtURL:readURL toURL:destination error:&copyError];
+            }];
+
+            if (coordinatorError) {
+                stepError = coordinatorError;
+            } else if (!copiedOK) {
+                stepError = copyError ?: [NSError errorWithDomain:@"DSPickers"
+                                                             code:-1
+                                                         userInfo:@{
+                    NSLocalizedDescriptionKey: [NSString stringWithFormat:@"拷贝 %@ 失败", source.lastPathComponent]
+                }];
+            }
         }
-        [DSPickers installCoordinatorOn:picker completion:completion cancel:cancel];
-        [host presentViewController:picker animated:YES completion:nil];
-    } label:@"添加源文件夹"];
+        @catch (NSException *exception) {
+            stepError = [NSError errorWithDomain:@"DSPickers"
+                                            code:-2
+                                        userInfo:@{
+                NSLocalizedDescriptionKey: [NSString stringWithFormat:@"拷贝 %@ 时异常：%@",
+                                            source.lastPathComponent, exception.reason ?: @"未知原因"]
+            }];
+        }
+        @finally {
+            if (scoped) {
+                @try { [source stopAccessingSecurityScopedResource]; }
+                @catch (__unused NSException *ignored) {}
+            }
+        }
+
+        if (stepError) {
+            if (!firstError) firstError = stepError;
+            NSLog(@"[DSPickers] 拷贝失败 %@：%@", source.lastPathComponent, stepError.localizedDescription);
+            continue;   // 其它文件继续拷，尽量多导入几个
+        }
+        [copied addObject:destination];
+    }
+
+    if (outError) *outError = firstError;
+    return copied;
+}
+
++ (void)presentOpenPickerCopyingInto:(NSURL *)destinationDirectory
+                                utis:(NSArray<NSString *> *)utiIdentifiers
+                            multiple:(BOOL)multiple
+                          completion:(DSPickerCopyCompletion)completion
+                              cancel:(DSPickerCancelHandler)cancel
+{
+    [self presentOpenPickerWithUTIs:utiIdentifiers
+                           multiple:multiple
+                             asCopy:NO
+                         completion:^(NSArray<NSURL *> *urls) {
+        if (urls.count == 0) {
+            if (completion) completion(@[], nil);
+            return;
+        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *error = nil;
+            NSArray<NSURL *> *copied = [DSPickers copyItemsAtURLs:urls
+                                                    intoDirectory:destinationDirectory
+                                                            error:&error];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(copied ?: @[], error);
+            });
+        });
+    } cancel:cancel];
+}
+
++ (void)presentFolderPickerCopyingInto:(NSURL *)destinationDirectory
+                            completion:(DSPickerFolderCopyCompletion)completion
+                                cancel:(DSPickerCancelHandler)cancel
+{
+    // 注意：文件夹**必须** asCopy:NO（Apple 明确不支持 asCopy 选文件夹）
+    [self presentFolderPickerWithCompletion:^(NSArray<NSURL *> *urls) {
+        NSURL *source = urls.firstObject;
+        if (!source) {
+            if (completion) completion(nil, nil);
+            return;
+        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSError *error = nil;
+            NSArray<NSURL *> *copied = [DSPickers copyItemsAtURLs:@[ source ]
+                                                    intoDirectory:destinationDirectory
+                                                            error:&error];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(copied.firstObject, error);
+            });
+        });
+    } cancel:cancel];
 }
 
 + (void)presentShareSheetForURLs:(NSArray<NSURL *> *)urls
