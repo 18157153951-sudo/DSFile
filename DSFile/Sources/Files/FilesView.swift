@@ -132,6 +132,7 @@ struct FilesView: View {
     @State private var newName: String = ""
     @State private var gotoVisible = false
     @State private var gotoText: String = ""
+    @State private var appManagerVisible = false
 
     private let bookmarks: [PathBookmark] = [
         PathBookmark(title: "根目录", path: "/"),
@@ -153,11 +154,15 @@ struct FilesView: View {
                 filterBar
                 content
             }
-            .navigationTitle("文件")
+            .navigationTitle(appContainerTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
             .sheet(item: $sheet) { item in
                 sheetContent(for: item)
+            }
+            .sheet(isPresented: $appManagerVisible) {
+                AppManagerView()
+                    .environmentObject(browser)
             }
             .alert("新建文件夹", isPresented: $newFolderVisible) {
                 TextField("文件夹名称", text: $newName)
@@ -308,6 +313,12 @@ struct FilesView: View {
 
     private var fileList: some View {
         List {
+            // 进到某个 App 的包体/数据容器时，顶部显示它的图标与桌面名字
+            if AppPathResolver.shared.resolve(path: browser.currentPath) != nil {
+                Section {
+                    AppPathHeaderIfAny(path: browser.currentPath)
+                }
+            }
             ForEach(browser.visibleItems) { item in
                 Button {
                     open(item)
@@ -426,6 +437,14 @@ struct FilesView: View {
 
     // MARK: - 工具栏
 
+    /// 当前目录属于某个 App 的包体/数据容器时，标题用它的桌面名字
+    private var appContainerTitle: String {
+        if let resolved = AppPathResolver.shared.resolve(path: browser.currentPath) {
+            return resolved.app.name
+        }
+        return "文件"
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
@@ -435,6 +454,13 @@ struct FilesView: View {
                 Image(systemName: "chevron.up")
             }
             .disabled(browser.currentPath == "/")
+        }
+        ToolbarItem(placement: .navigationBarLeading) {
+            Button {
+                appManagerVisible = true
+            } label: {
+                Image(systemName: "square.grid.2x2")
+            }
         }
         ToolbarItem(placement: .navigationBarTrailing) {
             Menu {

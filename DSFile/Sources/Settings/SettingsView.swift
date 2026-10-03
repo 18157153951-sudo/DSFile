@@ -43,11 +43,18 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.2"
+    private static let appVersion = "0.3.3"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.3", date: "2026-10-03", items: [
+            "新增「应用管理器」（文件页左上角方格图标）：列出已安装 App，长按一行可直接打开它的 .app 目录或数据容器",
+            "应用管理器支持按 App 名 / bundle id 搜索；详情页可复制包体路径、数据容器路径、bundle id",
+            "应用管理器里可以把某个 App「设为替换页目标 App」，自动切到替换页并选中它",
+            "文件页与替换页的目标目录浏览器：进到某个 App 的包体或数据容器时，顶部显示它的图标与桌面名字，标题也换成 App 名",
+            "App 图标三级回退（包内图标文件 → 系统私有接口 → 占位图标），任何一步拿不到都不会崩"
+        ]),
         ChangeEntry(version: "0.3.2", date: "2026-10-03", items: [
             "「替换」页新增文件夹模式：选一个本地文件夹，整体镜像替换目标 App 里的某个文件夹（目标里源没有的旧文件会被移除）",
             "文件夹模式强制开启备份：替换前把整个目标文件夹递归备份，回滚走同一套「一键回滚」",

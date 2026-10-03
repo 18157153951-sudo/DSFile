@@ -41,30 +41,30 @@ struct RootTabView: View {
 
     @EnvironmentObject private var kernel: KernelCenter
 
-    /// 用 selection 绑定，好让「替换」页完成后能跳回「记录」页看那条运行记录
-    @State private var selection = 0
+    /// 用单例 router 的 selection：应用管理器等页面也能切 Tab（例如「设为替换页目标 App」）
+    @ObservedObject private var router = AppRouter.shared
 
     var body: some View {
-        TabView(selection: $selection) {
+        TabView(selection: $router.tab) {
             FilesView()
                 .tabItem { Label("文件", systemImage: "folder") }
-                .tag(0)
+                .tag(AppTab.files.rawValue)
 
             ScriptsView()
                 .tabItem { Label("脚本", systemImage: "square.stack.3d.up") }
-                .tag(1)
+                .tag(AppTab.scripts.rawValue)
 
             TasksView()
                 .tabItem { Label("记录", systemImage: "clock.arrow.circlepath") }
-                .tag(2)
+                .tag(AppTab.records.rawValue)
 
-            ReplaceWizardView(onOpenRecords: { selection = 2 })
+            ReplaceWizardView(onOpenRecords: { router.go(to: .records) })
                 .tabItem { Label("替换", systemImage: "arrow.2.squarepath") }
-                .tag(3)
+                .tag(AppTab.replace.rawValue)
 
             SettingsView()
                 .tabItem { Label("设置", systemImage: "gearshape") }
-                .tag(4)
+                .tag(AppTab.settings.rawValue)
         }
         .accentColor(.blue)
     }

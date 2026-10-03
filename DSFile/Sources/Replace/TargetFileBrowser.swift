@@ -75,6 +75,13 @@ struct TargetFileBrowserSheet: View {
                     .font(.footnote)
                 }
 
+                // 正在浏览哪个 App：顶部显示它的图标与桌面名字（解析不出来就什么都不显示）
+                if AppPathResolver.shared.resolve(path: currentPath.isEmpty ? rootPath : currentPath) != nil {
+                    Section {
+                        AppPathHeaderIfAny(path: currentPath.isEmpty ? rootPath : currentPath)
+                    }
+                }
+
                 if !hasFileAccess {
                     Section {
                         HStack(spacing: 12) {
@@ -92,8 +99,7 @@ struct TargetFileBrowserSheet: View {
                         }
                         .padding(.vertical, 2)
                     }
-                } else if rootPath.isEmpty {
-                    Section {
+                } else if rootPath.isEmpty {                    Section {
                         Text("这个 App 没有可用的\(rootMode.title)路径。")
                             .font(.footnote)
                             .foregroundColor(.secondary)
@@ -162,7 +168,7 @@ struct TargetFileBrowserSheet: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle(pickFolders ? "选择目标文件夹" : "选择目标文件")
+            .navigationTitle(browserTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -244,6 +250,15 @@ struct TargetFileBrowserSheet: View {
         case .data: return app.dataPath ?? ""
         case .bundle: return app.bundlePath
         }
+    }
+
+    /// 正在浏览哪个 App 就用它的桌面名字当标题；解析不出来时回到原来的动作名
+    private var browserTitle: String {
+        let path = currentPath.isEmpty ? rootPath : currentPath
+        if let resolved = AppPathResolver.shared.resolve(path: path) {
+            return resolved.app.name
+        }
+        return pickFolders ? "选择目标文件夹" : "选择目标文件"
     }
 
     private var relativePath: String {

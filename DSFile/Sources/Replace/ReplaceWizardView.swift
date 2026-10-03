@@ -196,6 +196,33 @@ final class ReplaceWizardModel: ObservableObject {
         saveAutoTask()
     }
 
+    /// 应用管理器「设为替换页目标 App」：按 bundle id 选中（列表还没加载完就先拉一次）
+    func selectAppByBundleId(_ bundleId: String) {
+        guard !bundleId.isEmpty else { return }
+        if let app = apps.first(where: { $0.bundleId == bundleId }) {
+            applySelection(app)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let list = AppScanner.installedApps(force: true)
+            DispatchQueue.main.async {
+                self.apps = list
+                if let app = list.first(where: { $0.bundleId == bundleId }) {
+                    self.applySelection(app)
+                } else {
+                    self.append("没找到 bundle id 为 \(bundleId) 的 App", .warning)
+                }
+            }
+        }
+    }
+
+    private func applySelection(_ app: InstalledApp) {
+        selectedApp = app
+        append("目标：\(app.name)（\(app.bundleId)）", .info)
+        rematchAll()
+        saveAutoTask()
+    }
+
     /// 「更换」按钮：清掉目标（列表重新展开）
     func clearSelection() {
         selectedApp = nil
@@ -757,6 +784,12 @@ struct ReplaceWizardView: View {
             }
             .listStyle(.insetGrouped)
             .navigationTitle("替换")
+            // 应用管理器里点「设为替换页目标 App」：这里接住那次请求并选中
+            .onReceive(ReplaceTargetBus.shared.$pendingBundleId) { bundleId in
+                guard let bundleId = bundleId, !bundleId.isEmpty else { return }
+                _ = ReplaceTargetBus.shared.consume()
+                model.selectAppByBundleId(bundleId)
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
