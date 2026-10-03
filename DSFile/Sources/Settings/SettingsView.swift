@@ -43,11 +43,17 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.6.0"
+    private static let appVersion = "0.6.1"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.6.1", date: "2026-10-04", items: [
+            "**修掉 3105 模式卡在「取 socket 对象」这一步**：真机日志显示内核阶段成功、但 cred 路线在 `pcb → socket` 这一跳失败（`escape(-1) socket object address invalid`）——现在会自动回退并继续尝试，而不是直接放弃",
+            "**日志能自证**：这一跳失败时会把 **3105 的 pcb 全局量、偏移值、socket 原始读值/规范化后的值、以及失败原因**全部打出来，下次一眼就能看出是「变量没赋值」还是「偏移不对」",
+            "**两个有界兜底**：① `off_inpcb_inp_socket` 为 0 时回退到常量 `0x40`（两个后端在 17.x–18.x 上都是这个值）；② 读出的指针没通过校验时，先做 XPACI 规范化，再**只在 pcb 结构内（≤0x400）**做有界扫描找候选 socket —— 不做全内存扫描",
+            "**cred 候选也做 XPACI 规范化**：避免带 PAC 签名的 ucred 指针被误判为非法"
+        ]),
         ChangeEntry(version: "0.6.0", date: "2026-10-04", items: [
             "**3105 模式改用真正能用的那条路**：内核读写（3105 自带运行时 offset 反推的 `kexploit_opa334`）+ **cred 路线逃逸**（两个 socket 的 `so_cred` 指向同一对象 + `cr_uid` 校验定位 ucred，再走 `cred → label → sandbox → ext_set` 三步改写）—— 也就是当初 Filza 那条路上验证成功的那套，原语换成 3105 自己的",
             "**修掉 3105 模式取不到容器访问**：真机取证发现 iOS 18.5 的 ContainerManager 里**没有** `container_query_operation_set_part` / `…_set_part_domain` 两个符号，所以 `bad_query` 在 18.x 上必然返回 -1；它只在 iOS 26+ 才有意义，现在降级为备选分支",

