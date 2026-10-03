@@ -388,12 +388,25 @@ final class ReplaceWizardModel: ObservableObject {
 
             var folder = previous[full] ?? WizardFolder(localPath: full, name: name)
             folder.targetPath = previous[full]?.targetPath
-            let stats = Self.folderStats(full)
-            folder.itemCount = stats.count
-            folder.sizeText = Self.sizeText(stats.size)
             rebuilt.append(folder)
         }
         folders = rebuilt
+
+        // 文件数/体积统计放后台，避免大文件夹卡住界面
+        let snapshot = rebuilt
+        DispatchQueue.global(qos: .utility).async {
+            var stats: [String: (Int, Int64)] = [:]
+            for folder in snapshot {
+                stats[folder.localPath] = Self.folderStats(folder.localPath)
+            }
+            DispatchQueue.main.async {
+                for index in self.folders.indices {
+                    guard let stat = stats[self.folders[index].localPath] else { continue }
+                    self.folders[index].itemCount = stat.0
+                    self.folders[index].sizeText = Self.sizeText(stat.1)
+                }
+            }
+        }
     }
 
     func importFolders() {

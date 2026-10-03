@@ -223,11 +223,19 @@ enum ReplaceTaskBuilder {
         let runner = RecipeRunner(script: script, recipe: recipe, target: target)
         let result = runner.run()
 
+        // 文件夹模式把目标路径也写进 targetSummary，好让「最近的替换」那一行直接看得到路径
+        let targetSummary: String
+        if task.mode == .folders, !task.folders.isEmpty {
+            targetSummary = target.summary + " · → " + task.folders.map(\.targetPath).joined(separator: " · ")
+        } else {
+            targetSummary = target.summary
+        }
+
         let record = RunRecord(id: RunStore.makeRunId(scriptName: script.name),
                                date: Date(),
                                scriptName: script.name,
                                scriptKind: script.kind.rawValue,
-                               targetSummary: target.summary,
+                               targetSummary: targetSummary,
                                success: result.success,
                                dryRun: false,
                                summary: result.summary,
