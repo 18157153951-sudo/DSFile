@@ -1,14 +1,17 @@
 #ifndef DS3105_SYMBOL_PREFIX_H
 #define DS3105_SYMBOL_PREFIX_H
-#if defined(__cplusplus)
-extern "C" {
-#endif
 
 /*
  * 3105 后端符号前缀。
- * 3105 自带一份与现有 FilzaJailedDS 后端同名的 kexploit/krw 实现（kexploit_opa334、kread64…），
- * 两个后端必须能在同一个可执行文件里共存，所以把 3105 侧的所有自有符号统一改名为 t3105_*。
- * 该头只强制包含在 Vendor/ThreeOneOSFive 下的源码与 DS3105Kernel.m 里，绝不进入现有后端。
+ *
+ * 3105 自带一份与现有 FilzaJailedDS 后端同名的 kexploit/krw 实现（kexploit_opa334、kread64、early_kread64…），
+ * 两者必须共存于同一个可执行文件，所以把 3105 侧的所有自有符号统一改名为 t3105_*。
+ *
+ * 只通过 XcodeGen 的文件级 compilerFlags（-include）作用于 Vendor/ThreeOneOSFive 下的源文件，
+ * 绝不进入现有后端；3105 源码本身逐字节未改。
+ *
+ * 生成方式：从 3105 头文件声明 + 源文件**列 0** 定义中提取导出符号（缩进的局部变量不取），
+ * 再并入首次构建时 CI 实际报过的重复符号，最后剔除 C 类型名与 libc 符号。
  */
 
 #define amfi_cslot_get t3105_amfi_cslot_get
@@ -16,15 +19,29 @@ extern "C" {
 #define bad_query_list t3105_bad_query_list
 #define bad_query_release t3105_bad_query_release
 #define controlData t3105_controlData
+#define controlSocket t3105_controlSocket
 #define controlSocketPcb t3105_controlSocketPcb
 #define create_physically_contiguous_mapping t3105_create_physically_contiguous_mapping
+#define create_surface_with_address t3105_create_surface_with_address
 #define create_target_file t3105_create_target_file
 #define default_file_content t3105_default_file_content
+#define disable_excguard_kill t3105_disable_excguard_kill
+#define early_kread t3105_early_kread
+#define early_kread64 t3105_early_kread64
+#define early_kwrite32bytes t3105_early_kwrite32bytes
+#define early_kwrite64 t3105_early_kwrite64
 #define executableName t3105_executableName
 #define executablePath t3105_executablePath
+#define find_and_corrupt_socket t3105_find_and_corrupt_socket
 #define free_thread t3105_free_thread
+#define freeTarget t3105_freeTarget
+#define freeTargetSize t3105_freeTargetSize
+#define freeThread t3105_freeThread
+#define freeThreadStart t3105_freeThreadStart
 #define g_kernel_base t3105_g_kernel_base
 #define g_kernel_slide t3105_g_kernel_slide
+#define get_bootManifestHash t3105_get_bootManifestHash
+#define get_hw_cpufamily t3105_get_hw_cpufamily
 #define get_rootvnode t3105_get_rootvnode
 #define get_vnode_by_fd t3105_get_vnode_by_fd
 #define get_vnode_for_path_by_chdir t3105_get_vnode_for_path_by_chdir
@@ -32,19 +49,22 @@ extern "C" {
 #define getsockoptReadData t3105_getsockoptReadData
 #define gIsA18Above t3105_gIsA18Above
 #define gIsPACSupported t3105_gIsPACSupported
+#define gMlockDict t3105_gMlockDict
+#define goSync t3105_goSync
 #define gSelfProc t3105_gSelfProc
 #define gSelfTask t3105_gSelfTask
+#define highestSuccessIdx t3105_highestSuccessIdx
 #define init_globals t3105_init_globals
 #define init_target_file t3105_init_target_file
 #define initialize_physical_read_write t3105_initialize_physical_read_write
 #define IOSurfacePrefetchPages t3105_IOSurfacePrefetchPages
-#define iov t3105_iov
 #define ipc_entry_lookup t3105_ipc_entry_lookup
 #define is_kaddr_valid t3105_is_kaddr_valid
 #define is_pac_supported t3105_is_pac_supported
 #define isA18Device t3105_isA18Device
 #define kalloc_array_decode t3105_kalloc_array_decode
 #define kexploit_abort t3105_kexploit_abort
+#define kexploit_opa334 t3105_kexploit_opa334
 #define khexdump t3105_khexdump
 #define kread_ptr t3105_kread_ptr
 #define kread_smrptr t3105_kread_smrptr
@@ -61,8 +81,13 @@ extern "C" {
 #define kwrite8 t3105_kwrite8
 #define kwritebuf t3105_kwritebuf
 #define label_get_sandbox t3105_label_get_sandbox
+#define mach_vm_allocate t3105_mach_vm_allocate
+#define mach_vm_deallocate t3105_mach_vm_deallocate
+#define mach_vm_map t3105_mach_vm_map
 #define MCMActivateContainer t3105_MCMActivateContainer
+#define MCMActivateContainerPath t3105_MCMActivateContainerPath
 #define MCMBridgeAvailable t3105_MCMBridgeAvailable
+#define MCMContainerPathForIdentifier t3105_MCMContainerPathForIdentifier
 #define memset64 t3105_memset64
 #define off_arm_kernel_saved_state_sp t3105_off_arm_kernel_saved_state_sp
 #define off_arm_saved_state_uss_ss_64 t3105_off_arm_saved_state_uss_ss_64
@@ -145,9 +170,14 @@ extern "C" {
 #define off_vnode_v_writecount t3105_off_vnode_v_writecount
 #define offsets_init t3105_offsets_init
 #define pac_mask t3105_pac_mask
+#define pcAddress t3105_pcAddress
+#define pcObject t3105_pcObject
+#define pcSize t3105_pcSize
 #define pe_init t3105_pe_init
 #define pe_v1 t3105_pe_v1
 #define pe_v2 t3105_pe_v2
+#define physical_oob_read_mo t3105_physical_oob_read_mo
+#define physical_oob_read_mo_with_retry t3105_physical_oob_read_mo_with_retry
 #define physical_oob_write_mo t3105_physical_oob_write_mo
 #define proc_find t3105_proc_find
 #define proc_find_by_name t3105_proc_find_by_name
@@ -156,16 +186,28 @@ extern "C" {
 #define proc_name t3105_proc_name
 #define proc_self t3105_proc_self
 #define proc_task t3105_proc_task
+#define raceSync t3105_raceSync
 #define randomMarker t3105_randomMarker
+#define readFd t3105_readFd
+#define rwSocket t3105_rwSocket
 #define rwSocketPcb t3105_rwSocketPcb
+#define sandbox_access_is_active t3105_sandbox_access_is_active
+#define sandbox_elevate_to_root t3105_sandbox_elevate_to_root
+#define sandbox_escape t3105_sandbox_escape
 #define set_target_kaddr t3105_set_target_kaddr
 #define setTargetKaddr t3105_setTargetKaddr
 #define sizeof_ipc_entry t3105_sizeof_ipc_entry
 #define smr_base t3105_smr_base
+#define socketPcbIds t3105_socketPcbIds
+#define socketPorts t3105_socketPorts
 #define sockets_release t3105_sockets_release
+#define spray_socket t3105_spray_socket
+#define successReadCount t3105_successReadCount
 #define surface_mlock t3105_surface_mlock
 #define surface_munlock t3105_surface_munlock
 #define t1sz_boot t3105_t1sz_boot
+#define targetObject t3105_targetObject
+#define targetObjectOffset t3105_targetObjectOffset
 #define task_get_ipc_port_kobject t3105_task_get_ipc_port_kobject
 #define task_get_ipc_port_object t3105_task_get_ipc_port_object
 #define task_get_ipc_port_table_entry t3105_task_get_ipc_port_table_entry
@@ -189,10 +231,8 @@ extern "C" {
 #define vnode_unredirect_file t3105_vnode_unredirect_file
 #define vnode_unredirect_folder t3105_vnode_unredirect_folder
 #define vp_name t3105_vp_name
+#define wallpaper_zip_extract_entry t3105_wallpaper_zip_extract_entry
 #define wiredPageMarker t3105_wiredPageMarker
-
-#if defined(__cplusplus)
-}
-#endif
+#define writeFd t3105_writeFd
 
 #endif /* DS3105_SYMBOL_PREFIX_H */
