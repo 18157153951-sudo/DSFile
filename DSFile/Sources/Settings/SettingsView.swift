@@ -43,11 +43,17 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.6.1"
+    private static let appVersion = "0.6.2"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.6.2", date: "2026-10-04", items: [
+            "**3105 模式的「取 socket 对象」改成自定位**：不再假定 `pcb + 0x40` 就一定是 socket —— 真机日志显示这个偏移读出来不是内核指针（而 3105 的读原语本身是好的：它读内核基址能拿到完整 64 位值）",
+            "**候选偏移逐个试、用强校验自动选对**：对 `inpcb → socket` 试一组候选偏移（表里的值优先，然后 0x38/0x48/0x50/0x30/0x58/0x28/0x60/0x68/0x70/0x20/0x78）；每一对候选 socket 都用「两个 socket 的 `so_cred` 指向同一对象 + `cr_uid` 等于本进程 uid」验证，哪组通过就用哪组",
+            "**两个额外兜底**：① 也许 3105 的 pcb 全局量本身就是 socket 对象 → 直接当 socket 试；② 在 pcb 结构内（≤0x400）收集最多 4 个候选 socket 两两组合试（仍然只在已知对象内部读，不做全内存扫描）",
+            "**失败也能一次定位**：现在会把 pcb 前 0x80 字节按 8 字节打进日志，并列出所有试过的偏移与各自读值"
+        ]),
         ChangeEntry(version: "0.6.1", date: "2026-10-04", items: [
             "**修掉 3105 模式卡在「取 socket 对象」这一步**：真机日志显示内核阶段成功、但 cred 路线在 `pcb → socket` 这一跳失败（`escape(-1) socket object address invalid`）——现在会自动回退并继续尝试，而不是直接放弃",
             "**日志能自证**：这一跳失败时会把 **3105 的 pcb 全局量、偏移值、socket 原始读值/规范化后的值、以及失败原因**全部打出来，下次一眼就能看出是「变量没赋值」还是「偏移不对」",
