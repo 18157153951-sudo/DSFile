@@ -43,11 +43,18 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.4.0"
+    private static let appVersion = "0.5.0"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.5.0", date: "2026-10-03", items: [
+            "**新增第二个内核模式「3105」**（设置 → 内核模式里切换，默认仍是 FilzaJailedDS 2.2）：3105 自带更新的 offset 表，声明支持 iOS 17.0–18.7.1 / 26.0–26.6.1 / 27 beta，比现有后端覆盖更宽",
+            "两个模式**互相独立**：各自跑自己的代码、各自的就绪状态，切换后需要重新点一次「激活内核访问」；默认模式的行为与之前完全一致（只做加法，没有合并）",
+            "设置页现在会显示**每个模式的适用范围**、**你的设备/系统是否在范围内**，并给出一句推荐；如果所选模式不在范围内，激活前就会提示并给一个「切换到另一个模式」按钮",
+            "3105 模式在沙盒逃逸失败时还会自动尝试它的另一条路（`bad_query`：用 ContainerManager 查询越权换取沙盒扩展令牌），这也是它能在 iOS 26+ 上工作的原因",
+            "失败信息会写清**用的是哪个模式、卡在哪一阶段**（内核读写 / 定位进程 / 沙盒逃逸 / bad_query 回退）"
+        ]),
         ChangeEntry(version: "0.4.0", date: "2026-10-03", items: [
             "**目录浏览器交互统一**：点文件 = 选中（可多选，行尾打勾、顶部显示「已选 N 项」）；点文件夹 = 进入；长按文件夹 = 把它选为目标；右上角「**确定**」永远可用——有选中就提交选中的，没选中就把**当前所在目录**当目标（在根目录按它 = 整个 .app / 数据容器）",
             "修掉「选不中文件夹」和「选了文件但确定点不动」两个问题（根因是确认按钮和选择态绑在了一起）",
@@ -141,6 +148,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                backendSection
                 kernelSection
                 environmentSection
                 diagnosticsSection
@@ -204,6 +212,118 @@ struct SettingsView: View {
             .foregroundColor(.secondary)
         }
         .id(environmentRefreshToken)
+    }
+
+    // MARK: - 0. 内核模式（两套后端，用户自己选）
+
+    /// 与 DS3105Kernel.h 里的常量保持一致（改一处要同步改另一处）
+    private static let backendFilzaValue = "filzajailedds"
+    private static let backend3105Value = "3105"
+
+    @AppStorage("myfilza.kernelBackend") private var kernelBackend: String = "filzajailedds"
+
+    private var backendSection: some View {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        let major = v.majorVersion, minor = v.minorVersion, patch = v.patchVersion
+
+        // 适用范围与 3105 的 ExploitSupportPolicy.swift 一致
+        let t3105InRange = (major == 17 && minor <= 7)
+            || (major == 18 && (minor < 7 || (minor == 7 && patch <= 1)))
+            || (major == 26 && (minor < 6 || (minor == 6 && patch <= 1)))
+            || (major == 27 && minor == 0)
+        let filzaInRange = (major == 17 || major == 18)
+
+        let device = DSKernel.deviceModelIdentifier()
+        let os = "iOS \(DSKernel.systemVersion())"
+        let using3105 = (kernelBackend == Self.backend3105Value)
+        let selectedInRange = using3105 ? t3105InRange : filzaInRange
+
+        return Section {
+            Picker("内核模式", selection: $kernelBackend) {
+                Text("FilzaJailedDS 2.2").tag(Self.backendFilzaValue)
+                Text("3105").tag(Self.backend3105Value)
+            }
+            .pickerStyle(.segmented)
+
+            backendRow(name: "FilzaJailedDS 2.2",
+                       range: "iOS 17.x – 18.x",
+                       inRange: filzaInRange,
+                       selected: !using3105,
+                       note: "默认模式。老实现，本机（iPhone13,4 / 18.5）已实测可逃逸。")
+
+            backendRow(name: "3105",
+                       range: "iOS 17.0–18.7.1 / 26.0–26.6.1 / 27 beta",
+                       inRange: t3105InRange,
+                       selected: using3105,
+                       note: "上游 3105 自带更新的 offset 表，覆盖到 26.x / 27 beta；逃逸失败时还会自动尝试 bad_query（MCM 沙盒扩展令牌）。")
+
+            if !selectedInRange {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("当前所选模式未声明支持你的系统", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.subheadline)
+                    Text("\(device) / \(os)：\(using3105 ? "3105" : "FilzaJailedDS 2.2") 的适用范围是 \(using3105 ? "17.0–18.7.1 / 26.0–26.6.1 / 27 beta" : "17.x–18.x")。激活前建议先切换。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        kernelBackend = using3105 ? Self.backendFilzaValue : Self.backend3105Value
+                    } label: {
+                        Label("切换到另一个模式", systemImage: "arrow.left.arrow.right")
+                    }
+                    .font(.footnote)
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("内核模式")
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(recommendationText(filzaInRange: filzaInRange, t3105InRange: t3105InRange, device: device, os: os))
+                Text("两个模式互相独立、各跑各的代码；切换后需要重新点一次「激活内核访问」。默认模式的行为与之前完全一致。")
+            }
+            .font(.footnote)
+            .foregroundColor(.secondary)
+        }
+    }
+
+    private func recommendationText(filzaInRange: Bool, t3105InRange: Bool, device: String, os: String) -> String {
+        if filzaInRange && t3105InRange {
+            return "推荐：\(device) / \(os) 两个模式都支持，先用 FilzaJailedDS 2.2（本机已验证）；失败或需要 26.x / 27 时再切 3105。"
+        }
+        if t3105InRange && !filzaInRange {
+            return "推荐：\(device) / \(os) 只有 3105 声明支持，请选 3105。"
+        }
+        if filzaInRange && !t3105InRange {
+            return "推荐：\(device) / \(os) 只有 FilzaJailedDS 2.2 声明支持，请用它。"
+        }
+        return "\(device) / \(os)：两个模式都未声明支持你的系统，激活很可能失败（仍可尝试，失败会写明原因）。"
+    }
+
+    private func backendRow(name: String, range: String, inRange: Bool, selected: Bool, note: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                .font(.title3)
+                .foregroundColor(selected ? .accentColor : .secondary)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(name)
+                    .font(.subheadline)
+                    .fontWeight(selected ? .semibold : .regular)
+                Text("适用范围：\(range)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text(note)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Text(inRange ? "支持" : "未声明")
+                .font(.caption2)
+                .foregroundColor(inRange ? .green : .orange)
+        }
+        .padding(.vertical, 2)
     }
 
     // MARK: - 1. 内核访问

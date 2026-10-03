@@ -39,6 +39,7 @@
 #import "kexploit/krw.h"               // kread32 / is_kaddr_valid
 #import "kexploit/offsets.h"           // off_proc_p_pid 等
 #import "DSCredEscape.h"               // cred 路线的逃逸 / 提权（不调用 proc_self / 上游 sandbox_escape）
+#import "DS3105Kernel.h"              // 3105 模式：完全独立的第二个内核后端，只在被选中时使用
 #import "patchfinder.h"                // init_xpf（保留上游 XPF 能力，见下）
 #import "machine_info.h"               // CPU 家族宏
 
@@ -354,6 +355,63 @@ static uint32_t ds_cpu_family(void)
 
 #pragma mark - 激活
 
+/// 3105 后端激活。与下面 FilzaJailedDS 的路径**完全独立**：
+/// 不共用 kread/kwrite 原语、不共享就绪标志，只复用「沙盒外写探针」与统一的状态通知。
++ (DSKernelResult)ds_activate3105WithLog:(DSKernelLogBlock)log
+{
+    if (gEscaped || DS3105KernelIsReady()) {
+        if (log) log(@"[myfilza] 3105 后端已就绪，无需重复执行");
+        return DSKernelResultAlreadyActive;
+    }
+    if (gExploitAttempted) {
+        if (log) log(@"[myfilza] 本次运行已经尝试过一次内核漏洞（3105 模式）。同一个进程里重跑风险极高，"
+                      "请从后台完全退出 App 再重新打开后重试。");
+        gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultExploitFailed
+                                     userInfo:@{ NSLocalizedDescriptionKey: @"本次运行已尝试过内核漏洞，请重启 App 后再试" }];
+        return DSKernelResultExploitFailed;
+    }
+    gExploitAttempted = YES;
+
+    if (log) log([NSString stringWithFormat:@"[myfilza] 目标: %@ / iOS %@ / %@",
+                  [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
+    if (log) log(@"[myfilza] 内核后端 = 3105（kexploit_opa334 + sandbox_escape + bad_query；与 FilzaJailedDS 互不共用代码）");
+    if (log) log(@"[myfilza] 开始执行 3105 内核链路（可能耗时数秒到数十秒，界面短暂无响应属正常）…");
+
+    NSString *detail = nil;
+    int ret = 1009;
+    @try {
+        ret = DS3105KernelActivate(&detail);
+    } @catch (NSException *e) {
+        if (log) log([NSString stringWithFormat:@"[myfilza] 3105 后端抛出异常: %@", e.reason]);
+        detail = [NSString stringWithFormat:@"3105 模式：抛出异常 %@", e.reason];
+        ret = 1009;
+    }
+
+    ds_breadcrumb_write("[myfilza] 3105 后端返回 %d（阶段：%s）\n", ret, DS3105KernelLastStage().UTF8String);
+
+    if (ret == 0) {
+        gExploitDone = YES;
+        gEscaped = ds_probe_write_access();
+        if (log) log([NSString stringWithFormat:@"[myfilza] %@", detail ?: @"3105 后端完成"]);
+        if (gEscaped) {
+            if (log) log(@"[myfilza] *** 沙盒逃逸成功（3105 模式）：现在可以读写沙盒外的路径 ***");
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"myfilza.fileSystemAccessChanged" object:nil];
+            return DSKernelResultOK;
+        }
+        if (log) log([NSString stringWithFormat:@"[myfilza] 3105 自检认为成功，但沙盒外写探针失败 (errno=%d: %s)",
+                      errno, strerror(errno)]);
+        gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultEscapeFailed
+                                     userInfo:@{ NSLocalizedDescriptionKey: @"3105 后端执行完成，但沙盒外写探针仍失败" }];
+        return DSKernelResultEscapeFailed;
+    }
+
+    if (log) log([NSString stringWithFormat:@"[myfilza] 3105 后端失败（阶段：%@）：%@",
+                  DS3105KernelLastStage(), detail ?: @"未提供原因"]);
+    gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultExploitFailed
+                                 userInfo:@{ NSLocalizedDescriptionKey: (detail ?: @"3105 后端失败") }];
+    return DSKernelResultExploitFailed;
+}
+
 + (DSKernelResult)activateWithLog:(DSKernelLogBlock)log
 {
     @synchronized (self) {
@@ -368,7 +426,11 @@ static uint32_t ds_cpu_family(void)
     @try {
         if (log) ds_capture_start(log);
 
-        if (gEscaped) {
+        // === 唯一分派点：选了 3105 就整条走 3105 的独立路径，绝不进入下面的 FilzaJailedDS 逻辑 ===
+        // （未选中时这个 if 恒为假，下面的代码与 0.4.0 逐字一致）
+        if (DS3105KernelSelected()) {
+            result = [self ds_activate3105WithLog:log];
+        } else if (gEscaped) {
             if (log) log(@"[myfilza] 本进程沙盒已经是逃逸状态");
             result = DSKernelResultAlreadyActive;
         } else if (![self isSystemVersionSupported]) {

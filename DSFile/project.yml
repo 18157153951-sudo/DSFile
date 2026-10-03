@@ -22,6 +22,14 @@ targets:
       - path: ../FilzaTweak/apfs_own.m
       # 故意不包含 ../FilzaTweak/Tweak.m（那是给 Filza 用的 hook 层，App 里不需要）
       # 旧后端 ClearSword / lara / DSEscape 留在仓库做对照与回退，不参与编译。
+      # ===== 内核层（第二种后端）：3105 =====
+      # 与上面 FilzaJailedDS **完全隔离**：自带一份同名的 kexploit/krw 实现，
+      # 其自有符号经 DS3105SymbolPrefix.h 统一改名 t3105_*，因此两者可共存于同一可执行文件。
+      # 源码逐字节原样（来源与许可证 GPL-3.0 见 Vendor/ThreeOneOSFive/{LICENSE,THIRD_PARTY_NOTICES.md}）。
+      - path: Vendor/ThreeOneOSFive/exploit
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
+      - path: Vendor/ThreeOneOSFive/kexploit
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
     info:
       path: Sources/Info.plist
       properties:
@@ -47,8 +55,8 @@ targets:
         PRODUCT_NAME: myfilza
         PRODUCT_BUNDLE_IDENTIFIER: com.dsfile.app
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "3"
+        MARKETING_VERSION: "0.5.0"
+        CURRENT_PROJECT_VERSION: "5"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         # 出的是未签名 IPA，签名交给 eSign / 证书重签，entitlements 保持干净
