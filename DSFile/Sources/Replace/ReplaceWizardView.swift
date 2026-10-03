@@ -1279,9 +1279,19 @@ struct ReplaceWizardView: View {
     @State private var deleteTarget: ReplaceSavedTask?
 
     var body: some View {
-        NavigationView {
-            mainForm
-                .navigationTitle("替换")
+        NavigationView { finalView }
+            .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    // MARK: - body 拆分
+    // 说明：整个 body 原来是一个「NavigationView + 十几个修饰符」的超大单表达式，
+    // Swift 类型检查器会报 "unable to type-check this expression in reasonable time"。
+    // 这里把它拆成一条由多个小 computed property 串起来的链，每个只挂 1~3 个修饰符；
+    // 行为、文案、UI 结构完全不变。
+
+    private var coreView: some View {
+        mainForm
+            .navigationTitle("替换")
             // 应用管理器里点「设为替换页目标 App」：这里接住那次请求并选中
             .onReceive(ReplaceTargetBus.shared.$pendingBundleId) { bundleId in
                 guard let bundleId = bundleId, !bundleId.isEmpty else { return }
@@ -1295,6 +1305,10 @@ struct ReplaceWizardView: View {
                     }
                 }
             }
+    }
+
+    private var sheetsFileTargets: some View {
+        coreView
             .sheet(item: $candidateSheet) { file in
                 CandidateTargetSheet(file: file) { path in
                     model.setTarget(path: path, for: file.id, manual: false)
@@ -1309,6 +1323,10 @@ struct ReplaceWizardView: View {
                     manualSheet = nil
                 }
             }
+    }
+
+    private var sheetsFileBrowsers: some View {
+        sheetsFileTargets
             .sheet(item: $browserRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
                                        localFileName: request.file.name,
@@ -1326,6 +1344,10 @@ struct ReplaceWizardView: View {
                     folderBrowserRequest = nil
                 }
             }
+    }
+
+    private var sheetsBundleTargets: some View {
+        sheetsFileBrowsers
             .sheet(item: $bundleCandidateSheet) { file in
                 CandidateTargetSheet(file: file) { path in
                     model.setBundleTarget(path: path, for: file.id, manual: false)
@@ -1340,6 +1362,10 @@ struct ReplaceWizardView: View {
                     bundleManualSheet = nil
                 }
             }
+    }
+
+    private var sheetsBundleBrowsers: some View {
+        sheetsBundleTargets
             .sheet(item: $bundleBrowserRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
                                        localFileName: request.file.name,
@@ -1359,6 +1385,10 @@ struct ReplaceWizardView: View {
                     bundleFolderBrowserRequest = nil
                 }
             }
+    }
+
+    private var sheetsTargetFirst: some View {
+        sheetsBundleBrowsers
             .sheet(item: $targetFirstRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
                                        localFileName: "",
@@ -1376,6 +1406,10 @@ struct ReplaceWizardView: View {
                                        },
                                        onPick: { _ in })
             }
+    }
+
+    private var sheetsLocalPick: some View {
+        sheetsTargetFirst
             .sheet(item: $localCandidateSheet) { file in
                 CandidateTargetSheet(file: file, kind: .local) { path in
                     model.bindLocalFile(path, to: file.id, inBundle: localCandidateInBundle)
@@ -1392,6 +1426,10 @@ struct ReplaceWizardView: View {
                                          inBundle: pick.inBundle)
                 }
             }
+    }
+
+    private var dialogsTasks: some View {
+        sheetsLocalPick
             .alert("保存为自动化任务", isPresented: $namingTask) {
                 TextField("任务名", text: $newTaskName)
                 Button("保存") { model.saveCurrentAsTask(name: newTaskName) }
@@ -1421,6 +1459,10 @@ struct ReplaceWizardView: View {
             } message: {
                 Text("只删这条保存的配置，不会动已经改过的文件（回滚请用「记录」页或「最近的替换」）。")
             }
+    }
+
+    private var dialogsRun: some View {
+        dialogsTasks
             .sheet(item: $logSheetRun) { run in
                 RunLogSheet(title: "\(ReplaceWizardModel.timeText(run.date)) · \(run.summary)",
                             text: model.logText(for: run))
@@ -1451,11 +1493,19 @@ struct ReplaceWizardView: View {
             } message: {
                 Text("会用备份里的原件覆盖目标，并恢复原来的权限与属主；脚本新建的文件会被删掉。")
             }
+    }
+
+    private var alertActivation: some View {
+        dialogsRun
             .alert("还没激活内核访问", isPresented: $activationAlert) {
                 Button("好", role: .cancel) {}
             } message: {
                 Text("替换目标 App 里的文件需要先获得沙盒外写入权限：请到「设置」页点『激活内核访问』。")
             }
+    }
+
+    private var liveView: some View {
+        alertActivation
             .onAppear { handleFirstAppear() }
             .onReceive(NotificationCenter.default.publisher(for: ReplaceTaskRunner.didRunNotification)) { note in
                 handleTaskRunNotification(note)
@@ -1463,11 +1513,13 @@ struct ReplaceWizardView: View {
             .onReceive(NotificationCenter.default.publisher(for: .myfilzaFileSystemAccessChanged)) { _ in
                 handleFileSystemAccessChanged()
             }
+    }
+
+    private var finalView: some View {
+        liveView
             .onChange(of: model.needsActivation) { needs in
                 handleNeedsActivationChanged(needs)
             }
-        }
-        .navigationViewStyle(StackNavigationViewStyle())
     }
 
     // MARK: 生命周期与通知（拆成独立方法，避免视图构建器类型检查超时）
