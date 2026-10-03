@@ -63,9 +63,42 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
 
 @implementation DSShell
 
++ (NSString *)shellPath
+{
+    static NSString *cached = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // 越狱环境优先用越狱根里的 sh（rootless / roothide 的路径不一样）
+        NSArray<NSString *> *candidates = @[
+            @"/var/jb/bin/sh",
+            @"/var/jb/usr/bin/sh",
+            @"/bin/sh"
+        ];
+        for (NSString *path in candidates) {
+            if (access(path.fileSystemRepresentation, X_OK) == 0) {
+                cached = path;
+                return;
+            }
+        }
+        // roothide：越狱根形如 /var/containers/Bundle/Application/.jbroot-XXXX
+        NSString *bundleRoot = @"/var/containers/Bundle/Application";
+        NSArray<NSString *> *entries = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundleRoot error:nil];
+        for (NSString *entry in entries) {
+            if (![entry hasPrefix:@".jbroot-"]) { continue }
+            NSString *path = [[bundleRoot stringByAppendingPathComponent:entry] stringByAppendingPathComponent:@"bin/sh"];
+            if (access(path.fileSystemRepresentation, X_OK) == 0) {
+                cached = path;
+                return;
+            }
+        }
+        cached = @"/bin/sh";
+    });
+    return cached ?: @"/bin/sh";
+}
+
 + (BOOL)isShellAvailable
 {
-    return access("/bin/sh", X_OK) == 0;
+    return access([self shellPath].fileSystemRepresentation, X_OK) == 0;
 }
 
 + (int)execScript:(NSString *)scriptPath
@@ -81,7 +114,7 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
         return -1;
     }
     if (![self isShellAvailable]) {
-        if (error) *error = ds_error(-1, @"/bin/sh 不存在或不可执行");
+        if (error) *error = ds_error(-1, [NSString stringWithFormat:@"%@ 不存在或不可执行", [self shellPath]]);
         return -1;
     }
 
@@ -89,16 +122,17 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
     if (workingDirectory.length > 0) {
         // iOS 上没有 posix_spawn_file_actions_addchdir_np（那是 macOS 专有），
         // 这里用 sh 内建 cd 换工作目录，路径作为独立 argv 传入，不拼接字符串，天然没有注入问题：
-        //   sh -c 'cd "$1" || exit 1; shift; exec "$@"' sh <目录> /bin/sh <脚本> [参数…]
-        [argv addObject:@"/bin/sh"];
+        //   sh -c 'cd "$1" || exit 1; shift; exec "$@"' sh <目录> <sh> <脚本> [参数…]
+        NSString *shell = [self shellPath];
+        [argv addObject:shell];
         [argv addObject:@"-c"];
         [argv addObject:@"cd \"$1\" || exit 1; shift; exec \"$@\""];
         [argv addObject:@"sh"];
         [argv addObject:workingDirectory];
-        [argv addObject:@"/bin/sh"];
+        [argv addObject:shell];
         [argv addObject:scriptPath];
     } else {
-        [argv addObject:@"/bin/sh"];
+        [argv addObject:[self shellPath]];
         [argv addObject:scriptPath];
     }
     if (arguments.count > 0) [argv addObjectsFromArray:arguments];
@@ -123,19 +157,21 @@ static char **ds_build_envp(NSDictionary<NSString *, NSString *> *environment)
         return -1;
     }
     if (![self isShellAvailable]) {
-        if (error) *error = ds_error(-1, @"/bin/sh 不存在或不可执行");
+        if (error) *error = ds_error(-1, [NSString stringWithFormat:@"%@ 不存在或不可执行", [self shellPath]]);
         return -1;
     }
 
+    NSString *shell = [self shellPath];
     if (workingDirectory.length > 0) {
-        return [self ds_spawn:@[ @"/bin/sh", @"-c", @"cd \"$1\" || exit 1; shift; exec /bin/sh -c \"$1\"", @"sh", workingDirectory, command ]
+        NSString *inner = [NSString stringWithFormat:@"cd \"$1\" || exit 1; shift; exec %@ -c \"$1\"", shell];
+        return [self ds_spawn:@[ shell, @"-c", inner, @"sh", workingDirectory, command ]
                     directory:nil
                   environment:environment
                       timeout:timeout
                        output:output
                         error:error];
     }
-    return [self ds_spawn:@[ @"/bin/sh", @"-c", command ]
+    return [self ds_spawn:@[ shell, @"-c", command ]
                 directory:nil
               environment:environment
                   timeout:timeout

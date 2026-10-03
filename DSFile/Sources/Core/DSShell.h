@@ -13,7 +13,10 @@ typedef void (^DSShellOutputBlock)(NSString *line);
 
 @interface DSShell : NSObject
 
-/// /bin/sh 是否存在且可执行
+/// 可用的 sh 路径：越狱环境优先 /var/jb/bin/sh（roothide 走 .jbroot-*），否则 /bin/sh
++ (NSString *)shellPath;
+
+/// 上面那个 sh 是否存在且可执行
 + (BOOL)isShellAvailable NS_SWIFT_NAME(isShellAvailable());
 
 /// 同步执行一个 shell 脚本（调用方自己放到后台队列）

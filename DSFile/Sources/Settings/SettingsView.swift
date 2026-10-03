@@ -37,15 +37,26 @@ struct SettingsView: View {
     @State private var alertMessage: String = ""
     @State private var alertVisible: Bool = false
     @State private var elevateConfirmVisible: Bool = false
+    /// 点「重新探测环境」时换一个 token，逼 SwiftUI 重建这一块
+    @State private var environmentRefreshToken = UUID()
 
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.0"
+    private static let appVersion = "0.3.1"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.1", date: "2026-10-03", items: [
+            "「替换」页把「执行前自动备份」做成可见开关，关掉会明确提示没有回滚兜底",
+            "每次替换后给结果卡片，并新增「最近的替换」：逐条可回滚 / 看日志 / 删记录",
+            "目标 App 列表改成固定高度可滑动；选中后只留那一行 + 「更换」，不再撑满整屏",
+            "新增「浏览目标 App 目录」：数据容器 / 包体可切换，进目录看面包屑，点文件直接当目标路径",
+            "适配越狱环境：经典越狱 / rootless（/var/jb）/ roothide / TrollStore 可直接读写，不再强制先跑内核漏洞",
+            "设置页新增「环境」区块：一眼看到越狱类型、内核逃逸状态、是否已具备 root",
+            "关于页补上作者：端木awa"
+        ]),
         ChangeEntry(version: "0.3.0", date: "2026-10-03", items: [
             "改名 myfilza（bundle id 不变，覆盖升级不会丢脚本、备份和日志）",
             "「提权到 root」加固：没激活内核访问时明确提示并弹窗说明；执行前先弹确认；每一次写入前都过地址闸门；写完回读 cr_uid / cr_ruid / cr_svuid / cr_groups / cr_rgid / cr_svgid 写进日志",
@@ -71,6 +82,7 @@ struct SettingsView: View {
         NavigationView {
             Form {
                 kernelSection
+                environmentSection
                 diagnosticsSection
                 changeLogSection
                 logSection
@@ -85,6 +97,53 @@ struct SettingsView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    // MARK: - 环境（越狱 / rootless / roothide / TrollStore）
+
+    private var environmentSection: some View {
+        let info = EnvironmentProbe.info()
+        return Section {
+            ForEach(info.badges, id: \.title) { badge in
+                HStack(spacing: 12) {
+                    Image(systemName: badge.icon)
+                        .font(.title3)
+                        .foregroundColor(badge.ok ? .green : .secondary)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(badge.title)
+                            .font(.subheadline)
+                        Text(badge.value)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 2)
+            }
+
+            Button {
+                EnvironmentProbe.invalidate()
+                environmentRefreshToken = UUID()
+                kernel.refresh()
+            } label: {
+                Label("重新探测环境", systemImage: "arrow.clockwise")
+            }
+        } header: {
+            Text("环境")
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(info.summary)
+                Text("越狱 / roothide / TrollStore 环境下文件操作直接走 POSIX，不需要先跑内核漏洞；未越狱时才必须激活内核访问。")
+                if info.isRoot {
+                    Text("当前进程已是 uid 0（root），可以写 root 属主的文件。")
+                }
+            }
+            .font(.footnote)
+            .foregroundColor(.secondary)
+        }
+        .id(environmentRefreshToken)
     }
 
     // MARK: - 1. 内核访问
@@ -408,6 +467,10 @@ struct SettingsView: View {
                     tint: .blue,
                     title: "版本",
                     detail: "\(Self.appVersion)（Build \(Self.appBuild)）")
+            InfoRow(icon: "person.crop.circle",
+                    tint: .orange,
+                    title: "作者",
+                    detail: "端木awa")
             InfoRow(icon: "heart.fill",
                     tint: .pink,
                     title: "致谢",

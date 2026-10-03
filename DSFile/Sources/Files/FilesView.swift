@@ -34,9 +34,9 @@ final class BrowserModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var volumeText: String = ""
 
-    /// 没激活内核时只能待在 App 自己的沙盒里
+    /// 没激活内核、也不是越狱/TrollStore 环境时，只能待在 App 自己的沙盒里
     static func defaultStartPath() -> String {
-        if DSKernel.isEscaped() { return "/" }
+        if EnvironmentProbe.hasFileSystemAccess() { return "/" }
         return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? NSHomeDirectory()
     }
 

@@ -75,8 +75,28 @@ final class ReplaceWizardModel: ObservableObject {
     @Published var apps: [InstalledApp] = []
     @Published var lastRunSummary: String?
     @Published var lastBackupId: String?
+    @Published var lastRunSucceeded = false
+    /// 这一次执行是不是开着自动备份（决定「一键回滚」能不能用）
+    @Published var lastBackupEnabled = true
     /// 需要用户去设置页激活时置真，视图据此弹提示
     @Published var needsActivation = false
+
+    /// 「执行前自动备份」开关（持久化；关掉就没有回滚兜底）
+    @Published var autoBackup: Bool {
+        didSet { UserDefaults.standard.set(autoBackup, forKey: Self.autoBackupKey) }
+    }
+
+    static let autoBackupKey = "myfilza.replaceAutoBackup"
+    /// 本页产生的运行记录统一用这个名字，「最近的替换」按它过滤
+    static let runScriptName = "一键替换"
+
+    init() {
+        if let stored = UserDefaults.standard.object(forKey: Self.autoBackupKey) as? Bool {
+            autoBackup = stored
+        } else {
+            autoBackup = true
+        }
+    }
 
     let inboxDirectory: String = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? NSTemporaryDirectory()
@@ -108,6 +128,13 @@ final class ReplaceWizardModel: ObservableObject {
             selectedApp = app
             append("目标：\(app.name)（\(app.bundleId)）", .info)
         }
+        rematchAll()
+    }
+
+    /// 「更换」按钮：清掉目标（列表重新展开）
+    func clearSelection() {
+        selectedApp = nil
+        append("已取消目标选择", .info)
         rematchAll()
     }
 
@@ -269,6 +296,11 @@ final class ReplaceWizardModel: ObservableObject {
         append(trimmed.isEmpty ? "已清除 \(files[index].name) 的目标路径" : "\(files[index].name) → \(trimmed)", .info)
     }
 
+    /// 清除某一条的绑定（长按菜单用）
+    func clearTarget(for id: UUID) {
+        setTarget(path: "", for: id, manual: false)
+    }
+
     // MARK: - 执行
 
     var boundCount: Int { files.filter { ($0.targetPath ?? "").isEmpty == false }.count }
@@ -279,9 +311,9 @@ final class ReplaceWizardModel: ObservableObject {
             append("请先在上方选择目标 App", .error)
             return
         }
-        guard DSKernel.isEscaped() else {
+        guard EnvironmentProbe.hasFileSystemAccess() else {
             needsActivation = true
-            append("尚未激活内核访问：沙盒外的路径写不进去。请到「设置」页点『激活内核访问』，成功后再回来。", .error)
+            append("还没有沙盒外读写权限：请到「设置」页点『激活内核访问』；越狱 / roothide / TrollStore 环境下可以直接用。", .error)
             return
         }
 
@@ -294,7 +326,12 @@ final class ReplaceWizardModel: ObservableObject {
         isRunning = true
         lastRunSummary = nil
         lastBackupId = nil
+        lastRunSucceeded = false
+        lastBackupEnabled = autoBackup
         append("=== 开始替换：\(bound.count) 个文件 → \(app.name) ===", .info)
+        if !autoBackup {
+            append("⚠️ 本次关闭了「执行前自动备份」：覆盖后无法回滚，请自行确认。", .warning)
+        }
 
         var steps: [ScriptRecipe.Step] = []
         for file in bound {
@@ -311,7 +348,7 @@ final class ReplaceWizardModel: ObservableObject {
                                   name: "一键替换（\(app.name)）",
                                   note: "由「替换」页向导生成：每个文件替换前都会整份备份。",
                                   target: nil,
-                                  options: ScriptRecipe.Options(backup: true,
+                                  options: ScriptRecipe.Options(backup: autoBackup,
                                                                 killTarget: false,
                                                                 stopOnError: true,
                                                                 fixOwnership: true),
@@ -323,12 +360,13 @@ final class ReplaceWizardModel: ObservableObject {
                                     dataPath: app.dataPath ?? "",
                                     executableName: app.executableName)
 
-        let script = ScriptItem(name: "一键替换",
+        let script = ScriptItem(name: Self.runScriptName,
                                 kind: .recipe,
                                 fileName: "recipe.json",
                                 folderName: "一键替换")
 
         let runner = RecipeRunner(script: script, recipe: recipe, target: target)
+        let backupRequested = autoBackup
 
         DispatchQueue.global(qos: .userInitiated).async {
             let result = runner.run()
@@ -362,6 +400,8 @@ final class ReplaceWizardModel: ObservableObject {
                 }
                 self.lastRunSummary = result.summary
                 self.lastBackupId = result.backupId
+                self.lastRunSucceeded = result.success
+                self.lastBackupEnabled = backupRequested
                 RunStore.shared.reload()
                 DSLog.shared.info("一键替换 \(target.summary)：\(result.summary)",
                                   source: "替换")
@@ -402,6 +442,63 @@ final class ReplaceWizardModel: ObservableObject {
         }
     }
 
+    // MARK: - 最近的替换（与「记录」页共用同一份 RunStore 数据）
+
+    /// 只列本页产生的替换记录
+    var recentReplaceRuns: [RunRecord] {
+        RunStore.shared.runs.filter { $0.scriptName.hasPrefix(Self.runScriptName) }
+    }
+
+    func backupRecord(for run: RunRecord) -> BackupRecord? {
+        guard let id = run.backupId else { return nil }
+        return RunStore.shared.backups.first { $0.id == id }
+    }
+
+    func canRollback(_ run: RunRecord) -> Bool {
+        return backupRecord(for: run) != nil
+    }
+
+    /// 回滚某一条替换记录（统一走 RunStore.restore，不另写回滚逻辑）
+    func rollback(run: RunRecord) {
+        guard let backup = backupRecord(for: run) else {
+            append("这条记录没有可回滚的备份（当时可能关掉了自动备份，或没有文件被覆盖）", .warning)
+            return
+        }
+        guard !isRestoring else { return }
+        isRestoring = true
+        append("开始回滚 \(Self.timeText(run.date))（备份 \(backup.id)，\(backup.entries.count) 项）…", .info)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let restored = try RunStore.shared.restore(backup)
+                DispatchQueue.main.async {
+                    self.isRestoring = false
+                    RunStore.shared.reload()
+                    self.append("已回滚：恢复 \(restored) 项", .success)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isRestoring = false
+                    self.append("回滚失败：\(error.localizedDescription)", .error)
+                }
+            }
+        }
+    }
+
+    func deleteRun(_ run: RunRecord) {
+        RunStore.shared.deleteRun(run)
+        append("已删除记录 \(Self.timeText(run.date))", .info)
+    }
+
+    func logText(for run: RunRecord) -> String {
+        let text = RunStore.shared.logText(for: run)
+        return text.isEmpty ? "（这条记录没有日志文件）" : text
+    }
+
+    static func timeText(_ date: Date) -> String {
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
     // MARK: - 日志
 
     func append(_ text: String, _ level: LogLine.Level = .info) {
@@ -435,9 +532,12 @@ struct ReplaceWizardView: View {
 
     @State private var candidateSheet: ReplaceWizardModel.WizardFile?
     @State private var manualSheet: ReplaceWizardModel.WizardFile?
+    @State private var browserRequest: BrowserRequest?
     @State private var appFilter: String = ""
     @State private var activationAlert = false
     @State private var rollbackConfirm = false
+    @State private var logSheetRun: RunRecord?
+    @State private var pendingRollbackRun: RunRecord?
     @State private var loaded = false
 
     var body: some View {
@@ -447,6 +547,7 @@ struct ReplaceWizardView: View {
                 fileSection
                 runSection
                 resultSection
+                recentSection
                 logSection
             }
             .listStyle(.insetGrouped)
@@ -473,6 +574,34 @@ struct ReplaceWizardView: View {
                     model.setTarget(path: path, for: file.id, manual: true)
                     manualSheet = nil
                 }
+            }
+            .sheet(item: $browserRequest) { request in
+                TargetFileBrowserSheet(app: request.app,
+                                       localFileName: request.file.name,
+                                       initialTarget: request.file.targetPath) { path in
+                    model.setTarget(path: path, for: request.file.id, manual: true)
+                    browserRequest = nil
+                }
+            }
+            .sheet(item: $logSheetRun) { run in
+                RunLogSheet(title: "\(ReplaceWizardModel.timeText(run.date)) · \(run.summary)",
+                            text: model.logText(for: run))
+            }
+            .confirmationDialog("回滚这次替换？",
+                                isPresented: Binding(
+                                    get: { pendingRollbackRun != nil },
+                                    set: { if !$0 { pendingRollbackRun = nil } }
+                                ),
+                                titleVisibility: .visible) {
+                Button("回滚（把原件拷回去）", role: .destructive) {
+                    if let run = pendingRollbackRun {
+                        model.rollback(run: run)
+                        pendingRollbackRun = nil
+                    }
+                }
+                Button("取消", role: .cancel) { pendingRollbackRun = nil }
+            } message: {
+                Text("会用备份里的原件覆盖目标，并恢复原来的权限与属主；这次替换新建的文件会被删掉。")
             }
             .confirmationDialog("回滚这次替换？",
                                 isPresented: $rollbackConfirm,
@@ -545,6 +674,14 @@ struct ReplaceWizardView: View {
                 Text("没扫描到已安装 App。激活内核访问后再回来试试。")
                     .font(.footnote)
                     .foregroundColor(.secondary)
+            } else if let selected = model.selectedApp {
+                // 选中后只留这一行 + 「更换」，不再让一屏列表占满页面
+                appRow(selected, checked: true)
+                Button {
+                    model.clearSelection()
+                } label: {
+                    Label("更换目标 App", systemImage: "arrow.triangle.2.circlepath")
+                }
             } else {
                 if model.apps.count > 25 {
                     TextField("按名字或 bundle id 过滤", text: $appFilter)
@@ -552,47 +689,61 @@ struct ReplaceWizardView: View {
                         .disableAutocorrection(true)
                 }
 
-                ForEach(filteredApps) { app in
-                    Button {
-                        model.toggleSelection(app)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: model.selectedApp?.bundleId == app.bundleId ? "largecircle.fill.circle" : "circle")
-                                .font(.title3)
-                                .foregroundColor(model.selectedApp?.bundleId == app.bundleId ? .accentColor : .secondary)
-                                .frame(width: 28)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(app.name)
-                                    .font(.subheadline)
-                                    .foregroundColor(.primary)
-                                    .lineLimit(1)
-                                Text(app.bundleId)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                                if let data = app.dataPath {
-                                    Text(data)
-                                        .font(.system(.caption2, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                } else {
-                                    Text("没有数据容器")
-                                        .font(.caption2)
-                                        .foregroundColor(.orange)
-                                }
+                // 固定高度、内部可滑动（照参考文档里日志区的做法）
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(filteredApps) { app in
+                            Button {
+                                model.toggleSelection(app)
+                            } label: {
+                                appRow(app, checked: false)
                             }
+                            .buttonStyle(.plain)
                         }
-                        .padding(.vertical, 2)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(minHeight: 180, maxHeight: 260)
             }
         } header: {
             Text("目标 App")
         } footer: {
-            Text("单选：点一下选中，再点一下取消。下面会自动在它的数据容器里递归找同名文件。")
+            Text("单选：点一下选中，点「更换」可取消重选。选中后下面会自动在它的数据容器里递归找同名文件。")
         }
+    }
+
+    /// 目标 App 的统一行样式（与 Morph 的行模式一致）
+    private func appRow(_ app: InstalledApp, checked: Bool) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: checked ? "largecircle.fill.circle" : "circle")
+                .font(.title3)
+                .foregroundColor(checked ? .accentColor : .secondary)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(app.name)
+                    .font(.subheadline)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                Text(app.bundleId)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                if let data = app.dataPath {
+                    Text(data)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else {
+                    Text("没有数据容器")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
     }
 
     private var filteredApps: [InstalledApp] {
@@ -603,10 +754,10 @@ struct ReplaceWizardView: View {
         }
     }
 
-    /// 内核访问是否已激活（读一下 kernel.phase，让 SwiftUI 跟踪激活状态的变化）
+    /// 是否已经能读写沙盒外路径（内核逃逸 **或** 越狱/TrollStore 环境；读一下 kernel.phase 让 SwiftUI 跟着刷新）
     private var kernelReady: Bool {
         _ = kernel.phase
-        return DSKernel.isEscaped()
+        return EnvironmentProbe.hasFileSystemAccess()
     }
 
     // MARK: 替换文件
@@ -624,16 +775,31 @@ struct ReplaceWizardView: View {
                     switch file.state {
                     case .ambiguous:
                         candidateSheet = file
-                    case .notFound:
-                        manualSheet = file
-                    case .unique, .manual:
-                        // 已经绑定好了：再点一次可以改
-                        manualSheet = file
+                    case .notFound, .unique, .manual:
+                        // 默认动作改成「浏览目标 App 目录」；手填路径挪到长按菜单里
+                        openBrowser(for: file)
                     }
                 } label: {
                     WizardFileRow(file: file)
                 }
                 .buttonStyle(.plain)
+                .contextMenu {
+                    Button {
+                        openBrowser(for: file)
+                    } label: {
+                        Label("浏览目标 App 目录", systemImage: "folder")
+                    }
+                    Button {
+                        manualSheet = file
+                    } label: {
+                        Label("手填完整路径", systemImage: "keyboard")
+                    }
+                    Button {
+                        model.clearTarget(for: file.id)
+                    } label: {
+                        Label("清除绑定", systemImage: "xmark.circle")
+                    }
+                }
             }
             .onDelete { offsets in
                 model.removeFiles(at: offsets)
@@ -645,10 +811,19 @@ struct ReplaceWizardView: View {
                 Label("添加本地文件…", systemImage: "square.and.arrow.down")
             }
         } header: {
-            Text("替换文件（按文件名自动匹配）")
+            Text("替换文件（自动匹配 / 浏览目录 / 手填）")
         } footer: {
-            Text("唯一同名 → 自动绑定并在下面显示目标路径；同名多处或没找到 → 点那一行选择或手填。左滑从列表移除（文件本体留在 ReplaceInbox）。")
+            Text("唯一同名 → 自动绑定；同名多处 → 点那一行从候选里选；没找到 → 点那一行打开目标 App 目录浏览，或长按选「手填完整路径」。左滑从列表移除（文件本体留在 ReplaceInbox）。")
         }
+    }
+
+    /// 打开目标 App 目录浏览器（先确保选了目标 App）
+    private func openBrowser(for file: ReplaceWizardModel.WizardFile) {
+        guard let app = model.selectedApp else {
+            model.append("请先在上面选一个目标 App，再浏览它的目录", .error)
+            return
+        }
+        browserRequest = BrowserRequest(file: file, app: app)
     }
 
     // MARK: 执行
@@ -677,16 +852,28 @@ struct ReplaceWizardView: View {
                     .foregroundColor(kernelReady ? .green : .orange)
                     .frame(width: 28)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(kernelReady ? "内核访问已激活" : "尚未激活内核访问")
+                    Text(kernelReady ? "已具备沙盒外读写" : "还没有沙盒外读写权限")
                         .font(.subheadline)
                     Text(kernelReady
-                         ? "目标 App 沙盒外的路径可以直接读写"
-                         : "请到「设置」页点『激活内核访问』，否则替换会失败")
+                         ? EnvironmentProbe.info().summary
+                         : "请到「设置」页点『激活内核访问』；越狱 / roothide / TrollStore 环境可直接用")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
             }
             .padding(.vertical, 2)
+
+            Toggle(isOn: $model.autoBackup) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("执行前自动备份")
+                        .font(.subheadline)
+                    Text(model.autoBackup
+                         ? "覆盖前把原件整份存到 Documents/Backups，随时可一键回滚"
+                         : "已关闭：覆盖后没有回滚兜底")
+                        .font(.caption2)
+                        .foregroundColor(model.autoBackup ? .secondary : .orange)
+                }
+            }
 
             HStack {
                 Text("待替换")
@@ -695,7 +882,9 @@ struct ReplaceWizardView: View {
                     .foregroundColor(model.boundCount > 0 ? .secondary : .orange)
             }
         } footer: {
-            Text("执行前会把每个被覆盖的目标整份备份到 Documents/Backups；写之前自动把目标父目录属主改成 mobile:mobile。")
+            Text(model.autoBackup
+                 ? "执行前会把每个被覆盖的目标整份备份到 Documents/Backups；写之前自动把目标父目录属主改成 mobile:mobile。"
+                 : "⚠️ 自动备份已关闭：覆盖后无法回滚，需要兜底就把上面的开关打开。")
         }
     }
 
@@ -706,13 +895,17 @@ struct ReplaceWizardView: View {
         if let summary = model.lastRunSummary {
             Section {
                 HStack(spacing: 12) {
-                    Image(systemName: model.lastBackupId != nil ? "checkmark.circle.fill" : "info.circle.fill")
+                    Image(systemName: model.lastRunSucceeded ? "checkmark.circle.fill" : "xmark.octagon.fill")
                         .font(.title3)
-                        .foregroundColor(model.lastBackupId != nil ? .green : .secondary)
+                        .foregroundColor(model.lastRunSucceeded ? .green : .red)
                         .frame(width: 28)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(summary)
+                        Text(model.lastRunSucceeded ? "替换成功" : "替换未完全成功")
                             .font(.subheadline)
+                        Text(summary)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
                         if let id = model.lastBackupId {
                             Text("备份：\(id)")
                                 .font(.system(.caption2, design: .monospaced))
@@ -744,9 +937,36 @@ struct ReplaceWizardView: View {
             } header: {
                 Text("这次的结果")
             } footer: {
-                Text(model.lastBackupId == nil
-                     ? "这次没有产生备份（没有文件被真正覆盖），所以没有可回滚的内容。"
-                     : "回滚会把备份里的原件拷回原位，并恢复权限与属主。")
+                if !model.lastBackupEnabled {
+                    Text("⚠️ 这次执行时「执行前自动备份」是关的，所以没有备份、无法回滚。")
+                } else if model.lastBackupId == nil {
+                    Text("这次没有产生备份（没有文件被真正覆盖），所以没有可回滚的内容。")
+                } else {
+                    Text("回滚会把备份里的原件拷回原位，并恢复权限与属主。")
+                }
+            }
+        }
+    }
+
+    // MARK: 最近的替换
+
+    @ViewBuilder
+    private var recentSection: some View {
+        let runs = model.recentReplaceRuns
+        if !runs.isEmpty {
+            Section {
+                ForEach(Array(runs.prefix(8))) { run in
+                    RecentRunRow(run: run,
+                                 canRollback: model.canRollback(run),
+                                 isRestoring: model.isRestoring,
+                                 rollback: { pendingRollbackRun = run },
+                                 showLog: { logSheetRun = run },
+                                 delete: { model.deleteRun(run) })
+                }
+            } header: {
+                Text("最近的替换")
+            } footer: {
+                Text("回滚走的是和「记录」页同一套（RunStore.restore）；这里只列本页产生的替换记录，最多显示最近 8 条。")
             }
         }
     }
@@ -959,5 +1179,119 @@ private struct ManualTargetSheet: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+    }
+}
+
+// MARK: - 浏览请求（把目标 App 一起带进 sheet）
+
+struct BrowserRequest: Identifiable {
+    let id = UUID()
+    let file: ReplaceWizardModel.WizardFile
+    let app: InstalledApp
+}
+
+// MARK: - 单条记录的日志
+
+private struct RunLogSheet: View {
+    let title: String
+    let text: String
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                Text(text)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            }
+            .navigationTitle("替换日志")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("完成") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        UIPasteboard.general.string = text
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                }
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+}
+
+// MARK: - 「最近的替换」一行
+
+private struct RecentRunRow: View {
+
+    let run: RunRecord
+    let canRollback: Bool
+    let isRestoring: Bool
+    let rollback: () -> Void
+    let showLog: () -> Void
+    let delete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Image(systemName: run.success ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                    .font(.title3)
+                    .foregroundColor(run.success ? .green : .red)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(ReplaceWizardModel.timeText(run.date))
+                        .font(.subheadline)
+                    Text(run.summary)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                    Text(run.targetSummary)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 16) {
+                if canRollback {
+                    Button(role: .destructive) {
+                        rollback()
+                    } label: {
+                        Label(isRestoring ? "回滚中…" : "回滚", systemImage: "arrow.uturn.backward")
+                            .font(.footnote)
+                    }
+                    .disabled(isRestoring)
+                } else {
+                    Text("无备份")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+
+                Button {
+                    showLog()
+                } label: {
+                    Label("查看日志", systemImage: "doc.text.magnifyingglass")
+                        .font(.footnote)
+                }
+
+                Button(role: .destructive) {
+                    delete()
+                } label: {
+                    Label("删除记录", systemImage: "trash")
+                        .font(.footnote)
+                }
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 2)
     }
 }
