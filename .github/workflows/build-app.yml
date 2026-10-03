@@ -67,20 +67,34 @@ jobs:
           echo "== 架构 =="
           lipo -info "$BIN"
 
-      - name: 打包未签名 IPA
+      - name: 打包未签名 IPA（常规 + MHA 变体）
         working-directory: DSFile
         run: |
-          rm -rf Payload DSFile.ipa
-          mkdir -p Payload
+          rm -rf Payload Payload-mha DSFile.ipa myfilza-mha.ipa
+          mkdir -p Payload Payload-mha
           cp -R build/Release-iphoneos/myfilza.app Payload/
+          cp -R build/Release-iphoneos/myfilza.app Payload-mha/
           zip -qry DSFile.ipa Payload
-          ls -lh DSFile.ipa
-          echo "SHA256: $(shasum -a 256 DSFile.ipa | awk '{print $1}')"
+          # MHA 变体：把 Bundle ID 伪装成 Apple 的容器访问守护进程
+          # com.apple.mobile.MobileHouseArrest —— iOS 会据此下发特权沙盒 profile，
+          # 于是不跑任何内核漏洞就能读写别的 App 容器（3105 在 iOS 18.x 上用的就是这招）。
+          # 显示名改成 myfilza MHA，方便和常规包区分。
+          /usr/bin/plutil -replace CFBundleIdentifier -string 'com.apple.mobile.MobileHouseArrest' Payload-mha/myfilza.app/Info.plist
+          /usr/bin/plutil -replace CFBundleDisplayName -string 'myfilza MHA' Payload-mha/myfilza.app/Info.plist
+          /usr/bin/plutil -replace CFBundleName -string 'myfilzaMHA' Payload-mha/myfilza.app/Info.plist
+          zip -qry myfilza-mha.ipa Payload-mha
+          ls -lh DSFile.ipa myfilza-mha.ipa
+          echo "常规 SHA256: $(shasum -a 256 DSFile.ipa | awk '{print $1}')"
+          echo "MHA  SHA256: $(shasum -a 256 myfilza-mha.ipa | awk '{print $1}')"
+          echo "== MHA 变体的 Info.plist 关键字段 =="
+          /usr/bin/plutil -p Payload-mha/myfilza.app/Info.plist | grep -E 'CFBundleIdentifier|CFBundleDisplayName|CFBundleName'
 
       - name: 上传 IPA
         uses: actions/upload-artifact@v4
         with:
           name: DSFile-ipa
-          path: DSFile/DSFile.ipa
+          path: |
+            DSFile/DSFile.ipa
+            DSFile/myfilza-mha.ipa
           if-no-files-found: error
           retention-days: 30
