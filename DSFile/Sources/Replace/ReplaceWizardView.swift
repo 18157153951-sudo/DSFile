@@ -59,8 +59,9 @@ final class ReplaceWizardModel: ObservableObject {
 
     struct WizardFolder: Identifiable, Hashable {
         let id = UUID()
-        let localPath: String
-        let name: String
+        /// 本机源文件夹路径；还没配源时为空字符串（列表里会提示"点这一行挑一个"）
+        var localPath: String
+        var name: String
         var itemCount: Int = 0
         var sizeText: String = ""
         var targetPath: String?
@@ -126,19 +127,19 @@ final class ReplaceWizardModel: ObservableObject {
         didSet { UserDefaults.standard.set(autoBackup, forKey: Self.autoBackupKey) }
     }
 
-    /// 包体(.app)模式的语义（镜像 / 合并），持久化
-    @Published var bundleSemantics: ReplaceBundleSemantics {
-        didSet { UserDefaults.standard.set(bundleSemantics.rawValue, forKey: Self.bundleSemanticsKey) }
+    /// 「目标文件夹里多出来的文件」：保留 / 删除（持久化；三种模式共用同一个选项）
+    @Published var extraFilesPolicy: ReplaceExtraFilesPolicy {
+        didSet { UserDefaults.standard.set(extraFilesPolicy.rawValue, forKey: Self.extraFilesPolicyKey) }
     }
 
-    /// 包体模式的源文件（按文件名匹配进 .app）
+    /// 包体模式：.app 内部的文件目标
     @Published var bundleFiles: [WizardFile] = []
-    /// 包体模式的源文件夹（最多一个：换 / 并入整个 .app）
-    @Published var bundleFolder: WizardFolder?
+    /// 包体模式：.app 内部的文件夹目标（可多个，每个绑一个本机同名源文件夹）
+    @Published var bundleFolders: [WizardFolder] = []
 
     static let autoBackupKey = "myfilza.replaceAutoBackup"
     static let modeKey = "myfilza.replaceMode"
-    static let bundleSemanticsKey = "myfilza.replaceBundleSemantics"
+    static let extraFilesPolicyKey = "myfilza.replaceExtraFilesPolicy"
     /// 本页产生的运行记录统一用这个名字，「最近的替换」按它过滤
     static let runScriptName = ReplaceMode.runPrefix
 
@@ -154,11 +155,11 @@ final class ReplaceWizardModel: ObservableObject {
         } else {
             mode = .files
         }
-        if let raw = UserDefaults.standard.string(forKey: Self.bundleSemanticsKey),
-           let stored = ReplaceBundleSemantics(rawValue: raw) {
-            bundleSemantics = stored
+        if let raw = UserDefaults.standard.string(forKey: Self.extraFilesPolicyKey),
+           let stored = ReplaceExtraFilesPolicy(rawValue: raw) {
+            extraFilesPolicy = stored
         } else {
-            bundleSemantics = .mirror
+            extraFilesPolicy = .keep
         }
         savedTasks = ReplaceTaskStore.load()
     }
@@ -370,12 +371,38 @@ final class ReplaceWizardModel: ObservableObject {
     /// 目标优先：把用户挑好的目标路径变成绑定。
     /// 本机同名唯一 → 直接配上；多处 → 记候选让用户选；一个都没有 → 返回给界面去弹本机选择器。
     @discardableResult
+    /// 这个路径是不是目录（读不到就当不是）
+    static func isDirectoryPath(_ path: String) -> Bool {
+        guard !path.isEmpty else { return false }
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+        return exists && isDir.boolValue
+    }
+
     func addTargets(_ targetPaths: [String], inBundle: Bool) -> [UnmatchedTarget] {
         var unmatched: [UnmatchedTarget] = []
         var added = 0
         for target in targetPaths {
             let name = (target as NSString).lastPathComponent
             guard !name.isEmpty else { continue }
+
+            // 目标是文件夹 → 走「文件夹目标」：在本机按同名找源文件夹；找不到就先加一行"待配源"，
+            // 用户点那一行再挑本机源文件夹（与文件目标一样的思路，不阻塞、不丢条目）。
+            if Self.isDirectoryPath(target) {
+                let localDir = (folderSourceDirectory as NSString).appendingPathComponent(name)
+                let localExists = Self.isDirectoryPath(localDir)
+                var folder = WizardFolder(localPath: localExists ? localDir : "", name: name)
+                folder.targetPath = target
+                if localExists {
+                    let stats = Self.folderStats(localDir)
+                    folder.itemCount = stats.count
+                    folder.sizeText = Self.sizeText(stats.size)
+                }
+                if inBundle { bundleFolders.append(folder) } else { folders.append(folder) }
+                added += 1
+                continue
+            }
+
             let matches = findLocalMatches(name: name)
             let row: WizardFile
             switch matches.count {
@@ -714,9 +741,9 @@ final class ReplaceWizardModel: ObservableObject {
         markDirty()
     }
 
-    /// 包体模式：导入一个源文件夹（整包换 / 并入）
+    /// 包体模式：导入一个源文件夹，作为一条「文件夹目标」的本机源
     /// 文件夹**不能** asCopy:YES（UIKit 会抛异常），所以走「选完由 DSPickers 拷进沙盒」的入口；
-    /// 大文件夹（例如整个 .app）拷贝要花点时间，界面会短暂无反应，属正常。
+    /// 大文件夹拷贝要花点时间，界面会短暂无反应，属正常。
     func importBundleFolder(thenBindTo target: String? = nil) {
         withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerCopying(into: URL(fileURLWithPath: self.folderSourceDirectory),
                                                                            completion: { copied, error in
@@ -728,48 +755,70 @@ final class ReplaceWizardModel: ObservableObject {
                 return
             }
             self.append("已导入源文件夹 \(copied.lastPathComponent)", .success)
-            self.reloadBundleFolder(preferred: copied.path)
-            // 调用方给了目标（用户在浏览器里点了「选择此文件夹」）→ 选完源文件夹立刻绑上
-            if let target = target, !target.isEmpty {
-                self.setBundleFolderTarget(path: target)
-            }
+            self.appendBundleFolder(localPath: copied.path, targetPath: target)
             self.markDirty()
         }, cancel: nil) }
     }
 
-    /// 重新统计包体模式的源文件夹（保留已绑定的目标；新导入时默认目标就是目标 App 的 .app）
-    func reloadBundleFolder(preferred: String? = nil) {
-        let fm = FileManager.default
-        try? fm.createDirectory(atPath: folderSourceDirectory, withIntermediateDirectories: true)
-        guard let path = preferred ?? bundleFolder?.localPath, fm.fileExists(atPath: path) else {
-            bundleFolder = nil
+    /// 往包体模式的文件夹目标列表里加一条（同一路径不重复加；已有则只更新目标）
+    func appendBundleFolder(localPath: String, targetPath: String?) {
+        let trimmedTarget = (targetPath ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if let index = bundleFolders.firstIndex(where: { $0.localPath == localPath }) {
+            if !trimmedTarget.isEmpty { bundleFolders[index].targetPath = trimmedTarget }
             return
         }
-        var folder = WizardFolder(localPath: path, name: (path as NSString).lastPathComponent)
-        folder.targetPath = bundleFolder?.targetPath ?? selectedApp?.bundlePath
-        let stats = Self.folderStats(path)
+        var folder = WizardFolder(localPath: localPath, name: (localPath as NSString).lastPathComponent)
+        folder.targetPath = trimmedTarget.isEmpty ? nil : trimmedTarget
+        let stats = Self.folderStats(localPath)
         folder.itemCount = stats.count
         folder.sizeText = Self.sizeText(stats.size)
-        bundleFolder = folder
+        bundleFolders.append(folder)
     }
 
-    func setBundleFolderTarget(path: String) {
-        guard var folder = bundleFolder else {
-            // 还没有源文件夹：不弹提示挡路，直接进入「选源文件夹」流程，选完自动绑到这个目标
-            let target = path.trimmingCharacters(in: .whitespacesAndNewlines)
-            append("还没有源文件夹：先选一个本机源文件夹，选完自动绑定到 \(target)", .info)
-            importBundleFolder(thenBindTo: target)
+    /// 某个「文件夹目标」还没配本机源文件夹时，挑一个（文件模式与包体模式共用）
+    func pickLocalFolder(for id: UUID, inBundle: Bool) {
+        withPickerSafety("选择本机源文件夹") { DSPickers.presentFolderPickerCopying(into: URL(fileURLWithPath: self.folderSourceDirectory),
+                                                                          completion: { copied, error in
+            if let error = error {
+                self.append("导入文件夹失败：\(error.localizedDescription)", .error)
+            }
+            guard let copied = copied else { return }
+            let stats = Self.folderStats(copied.path)
+            if inBundle {
+                guard let index = self.bundleFolders.firstIndex(where: { $0.id == id }) else { return }
+                self.bundleFolders[index].localPath = copied.path
+                self.bundleFolders[index].name = copied.lastPathComponent
+                self.bundleFolders[index].itemCount = stats.count
+                self.bundleFolders[index].sizeText = Self.sizeText(stats.size)
+            } else {
+                guard let index = self.folders.firstIndex(where: { $0.id == id }) else { return }
+                self.folders[index].localPath = copied.path
+                self.folders[index].name = copied.lastPathComponent
+                self.folders[index].itemCount = stats.count
+                self.folders[index].sizeText = Self.sizeText(stats.size)
+            }
+            self.append("已绑定本机源文件夹：\(copied.lastPathComponent)", .success)
+            self.markDirty()
+        }, cancel: nil) }
+    }
+
+    /// 设置某个「文件夹目标」的路径（包体模式：目标在 .app 内部）
+    func setBundleFolderTarget(path: String, for id: UUID) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let index = bundleFolders.firstIndex(where: { $0.id == id }) {
+            bundleFolders[index].targetPath = trimmed.isEmpty ? nil : trimmed
+            append(trimmed.isEmpty ? "已清除文件夹目标" : "文件夹目标 → \(trimmed)", .info)
+            markDirty()
             return
         }
-        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        folder.targetPath = trimmed.isEmpty ? nil : trimmed
-        bundleFolder = folder
-        append(trimmed.isEmpty ? "已清除源文件夹的目标路径" : "源文件夹 → \(trimmed)", .info)
-        markDirty()
+        // 还没有这一行：按「目标优先」加一条，紧接着让用户选本机源文件夹
+        guard !trimmed.isEmpty else { return }
+        append("已选中目标文件夹：\(trimmed)，接着选择本机源文件夹…", .info)
+        importBundleFolder(thenBindTo: trimmed)
     }
 
-    func removeBundleFolder() {
-        bundleFolder = nil
+    func removeBundleFolder(id: UUID) {
+        bundleFolders.removeAll { $0.id == id }
         markDirty()
     }
 
@@ -909,11 +958,11 @@ final class ReplaceWizardModel: ObservableObject {
     var boundCount: Int { files.filter { ($0.targetPath ?? "").isEmpty == false }.count }
     var boundFolderCount: Int { folders.filter { ($0.targetPath ?? "").isEmpty == false }.count }
     var boundBundleFileCount: Int { bundleFiles.filter { ($0.targetPath ?? "").isEmpty == false }.count }
-    var boundBundleFolderCount: Int { (bundleFolder?.targetPath ?? "").isEmpty ? 0 : 1 }
+    var boundBundleFolderCount: Int { bundleFolders.filter { ($0.targetPath ?? "").isEmpty == false }.count }
     /// 当前模式下已绑定的条目数
     var currentBoundCount: Int {
         switch mode {
-        case .files: return boundCount
+        case .files: return boundCount + boundFolderCount
         case .folders: return boundFolderCount
         case .bundle: return boundBundleFileCount + boundBundleFolderCount
         }
@@ -921,12 +970,21 @@ final class ReplaceWizardModel: ObservableObject {
     /// 当前模式下的条目总数
     var currentItemCount: Int {
         switch mode {
-        case .files: return files.count
+        case .files: return files.count + folders.count
         case .folders: return folders.count
-        case .bundle: return bundleFiles.count + (bundleFolder == nil ? 0 : 1)
+        case .bundle: return bundleFiles.count + bundleFolders.count
         }
     }
     var readyToRun: Bool { selectedApp != nil && currentBoundCount > 0 && !isRunning }
+
+    /// 这次任务里有没有「文件夹类目标」：有就强制备份，且「多出来的文件」选项才生效
+    var hasFolderTargets: Bool {
+        switch mode {
+        case .files: return !folders.isEmpty
+        case .folders: return !folders.isEmpty
+        case .bundle: return !bundleFolders.isEmpty
+        }
+    }
 
     /// 把当前界面上的绑定收成一份配置（保存任务 / 立即执行共用同一份数据）
     func currentTask(forceBackup: Bool = false) -> ReplaceAutoTask {
@@ -942,7 +1000,7 @@ final class ReplaceWizardModel: ObservableObject {
             sourceFolders = folders
         case .bundle:
             sourceFiles = bundleFiles
-            sourceFolders = bundleFolder.map { [$0] } ?? []
+            sourceFolders = bundleFolders
         }
 
         return ReplaceAutoTask(bundleId: app?.bundleId ?? "",
@@ -961,11 +1019,13 @@ final class ReplaceWizardModel: ObservableObject {
                                },
                                folders: sourceFolders.compactMap { folder in
                                    guard let target = folder.targetPath, !target.isEmpty else { return nil }
+                                   // 还没配本机源文件夹的条目不进配方（避免空 source）
+                                   guard !folder.localPath.isEmpty else { return nil }
                                    return ReplaceFolderBinding(localPath: folder.localPath,
                                                                name: folder.name,
                                                                targetPath: target)
                                },
-                               semantics: mode == .bundle ? bundleSemantics : nil,
+                               extraFiles: extraFilesPolicy,
                                backup: forceBackup ? true : autoBackup,
                                updatedAt: Date())
     }
@@ -1066,15 +1126,13 @@ final class ReplaceWizardModel: ObservableObject {
             }
         case .bundle:
             bundleFiles = task.files.map { makeWizardFile(localPath: $0.localPath, name: $0.name, targetPath: $0.targetPath) }
-            if let first = task.folders.first {
-                var folder = WizardFolder(localPath: first.localPath, name: first.name)
-                folder.targetPath = first.targetPath
-                bundleFolder = folder
-            } else {
-                bundleFolder = nil
+            bundleFolders = task.folders.map { binding in
+                var folder = WizardFolder(localPath: binding.localPath, name: binding.name)
+                folder.targetPath = binding.targetPath
+                return folder
             }
-            bundleSemantics = task.effectiveSemantics
         }
+        extraFilesPolicy = task.effectiveExtraFiles
         autoBackup = task.backup
         hasUnsavedChanges = false
         append("已载入任务「\(saved.name)」：\(task.summary)", .info)
@@ -1096,8 +1154,8 @@ final class ReplaceWizardModel: ObservableObject {
             return
         }
 
-        // 文件夹绑定是「镜像替换」（会删掉目标里多余的旧文件），所以只要任务里有文件夹就强制备份
-        let forceBackup = mode != .files || !folders.isEmpty
+        // 文件夹类目标会动到整个目录（按「多出来的文件」选项可能删文件），所以只要任务里有文件夹就强制备份
+        let forceBackup = mode != .files || !folders.isEmpty || !bundleFolders.isEmpty
         let task = currentTask(forceBackup: forceBackup)
         guard !task.isEmpty else {
             switch mode {
@@ -1129,10 +1187,11 @@ final class ReplaceWizardModel: ObservableObject {
         case .bundle: modeText = "包体(.app)"
         }
         append("=== 开始\(modeText)替换：\(task.itemCount) 项 → \(app.name) ===", .info)
-        if mode == .folders {
-            append("镜像语义：目标文件夹会被源文件夹整体替换（目标里源没有的旧文件会被移除）；替换前已强制整棵递归备份。", .warning)
-        } else if mode == .bundle {
-            append("包体语义：\(bundleSemantics.title)——\(bundleSemantics.subtitle)；替换前整棵递归备份。", .warning)
+        let hasFolderTargets = (mode == .folders) || !folders.isEmpty || !bundleFolders.isEmpty
+        if hasFolderTargets {
+            append("文件夹类目标：目标文件夹里多出来的文件会「\(extraFilesPolicy.title)」——\(extraFilesPolicy.subtitle)；替换前已强制整棵递归备份。", .warning)
+        }
+        if mode == .bundle {
             append("⚠️ 改自签 App 的包体会破坏它的签名校验，可能导致 App 直接打不开；动手前确认你有重装手段。", .warning)
         }
         if !task.backup {
@@ -1369,19 +1428,27 @@ struct ReplaceWizardView: View {
         sheetsFileTargets
             .sheet(item: $browserRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
-                                       localFileName: request.file.name,
+                                       actionTitle: "选择目标文件 / 文件夹",
                                        initialTarget: request.file.targetPath,
-                                       onPickFolder: pickFileFolderTarget) { path in
-                    model.setTarget(path: path, for: request.file.id, manual: true)
+                                       highlightName: request.file.name) { paths in
+                    if let first = paths.first {
+                        model.setTarget(path: first, for: request.file.id, manual: true)
+                    }
+                    // 多选回来的其余项直接作为新目标加进列表
+                    if paths.count > 1 {
+                        _ = model.addTargets(Array(paths.dropFirst()), inBundle: false)
+                    }
                     browserRequest = nil
                 }
             }
             .sheet(item: $folderBrowserRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
-                                       localFileName: request.folder.name,
+                                       actionTitle: "选择目标文件夹",
                                        initialTarget: request.folder.targetPath,
-                                       pickFolders: true) { path in
-                    model.setFolderTarget(path: path, for: request.folder.id)
+                                       highlightName: request.folder.name) { paths in
+                    if let first = paths.first {
+                        model.setFolderTarget(path: first, for: request.folder.id)
+                    }
                     folderBrowserRequest = nil
                 }
             }
@@ -1409,21 +1476,28 @@ struct ReplaceWizardView: View {
         sheetsBundleTargets
             .sheet(item: $bundleBrowserRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
-                                       localFileName: request.file.name,
+                                       actionTitle: "选择 .app 内的目标文件 / 文件夹",
                                        initialTarget: request.file.targetPath,
                                        lockedRoot: request.app.bundlePath,
-                                       onPickFolder: pickBundleFolderTarget) { path in
-                    model.setBundleTarget(path: path, for: request.file.id, manual: true)
+                                       highlightName: request.file.name) { paths in
+                    if let first = paths.first {
+                        model.setBundleTarget(path: first, for: request.file.id, manual: true)
+                    }
+                    if paths.count > 1 {
+                        _ = model.addTargets(Array(paths.dropFirst()), inBundle: true)
+                    }
                     bundleBrowserRequest = nil
                 }
             }
             .sheet(item: $bundleFolderBrowserRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
-                                       localFileName: request.folder.name,
+                                       actionTitle: "选择 .app 内的目标文件夹",
                                        initialTarget: request.folder.targetPath,
-                                       pickFolders: true,
-                                       lockedRoot: request.app.bundlePath) { path in
-                    model.setBundleFolderTarget(path: path)
+                                       lockedRoot: request.app.bundlePath,
+                                       highlightName: request.folder.name) { paths in
+                    if let first = paths.first {
+                        model.setBundleFolderTarget(path: first, for: request.folder.id)
+                    }
                     bundleFolderBrowserRequest = nil
                 }
             }
@@ -1433,21 +1507,19 @@ struct ReplaceWizardView: View {
         sheetsBundleBrowsers
             .sheet(item: $targetFirstRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
-                                       localFileName: "",
+                                       actionTitle: request.inBundle
+                                           ? "选择 .app 内的目标文件 / 文件夹"
+                                           : "选择数据容器内的目标文件 / 文件夹",
                                        initialTarget: nil,
-                                       lockedRoot: request.inBundle ? request.app.bundlePath : nil,
-                                       allowsMultipleSelection: true,
-                                       onPickFolder: request.inBundle ? pickBundleFolderTarget : pickFileFolderTarget,
-                                       onPickMany: { paths in
-                                           let unmatched = model.addTargets(paths, inBundle: request.inBundle)
-                                           targetFirstRequest = nil
-                                           if let first = unmatched.first {
-                                               pendingLocalPick = PendingLocalPick(rowID: first.id,
-                                                                                  target: first.target,
-                                                                                  inBundle: request.inBundle)
-                                           }
-                                       },
-                                       onPick: { _ in })
+                                       lockedRoot: request.inBundle ? request.app.bundlePath : nil) { paths in
+                    let unmatched = model.addTargets(paths, inBundle: request.inBundle)
+                    targetFirstRequest = nil
+                    if let first = unmatched.first {
+                        pendingLocalPick = PendingLocalPick(rowID: first.id,
+                                                           target: first.target,
+                                                           inBundle: request.inBundle)
+                    }
+                }
             }
     }
 
@@ -1573,7 +1645,6 @@ struct ReplaceWizardView: View {
         model.reloadInbox()
         model.reloadFolders()
         model.reloadBundleFiles()
-        model.reloadBundleFolder()
         model.reloadSavedTasks()
         model.loadAppsIfNeeded()
         model.append("提示：每次替换前都会整份备份（文件夹 / 包体模式是整棵递归备份），随时可以在下方或「记录」页一键回滚。", .info)
@@ -1633,17 +1704,6 @@ struct ReplaceWizardView: View {
         }
     }
 
-    /// 目标浏览器右上角「选择此文件夹」→ 把当前所在目录设成包体源文件夹的目标
-    private func pickBundleFolderTarget(_ path: String) {
-        model.setBundleFolderTarget(path: path)
-    }
-
-    /// 目标浏览器右上角「选择此文件夹」（文件模式）→ 新增一条文件夹绑定（整目录镜像替换），
-    /// 紧接着弹本机文件夹选择器让用户指定源；用户取消就什么都不加。
-    private func pickFileFolderTarget(_ path: String) {
-        model.addFileFolderBinding(targetPath: path)
-    }
-
     /// 工具栏「+」：按当前模式走对应的导入入口。
     /// 单独抽成方法是为了给 SwiftUI 的 body 减负——整段 body 表达式过于复杂时，
     /// 编译器会报 "unable to type-check this expression in reasonable time"。
@@ -1673,7 +1733,7 @@ struct ReplaceWizardView: View {
             case .files:
                 Text("文件模式：把本地文件按文件名替换进目标 App（自动匹配 / 浏览目录 / 手填三条路）。")
             case .folders:
-                Text("文件夹模式：把本地文件夹整体**镜像替换**进目标文件夹——目标里源没有的旧文件会被移除，替换前强制整棵递归备份。")
+                Text("文件夹模式：把本地文件夹写进目标文件夹。目标里多出来的文件怎么处理，由下面执行区的「多出来的文件：保留 / 删除」决定（默认保留 = 只覆盖同名文件）；替换前强制整棵递归备份。")
             case .bundle:
                 Text("包体(.app)模式：目标锁定为所选 App 的包体，可以放一个源文件夹（整包换 / 并入）或若干文件（按文件名匹配进 .app）。")
             }
@@ -1879,11 +1939,17 @@ struct ReplaceWizardView: View {
                 model.removeFiles(at: offsets)
             }
 
-            // 文件模式下的「文件夹绑定」（整目录镜像替换）：由目标浏览器右上角「选择此文件夹」创建。
+            // 文件模式下的「文件夹目标」（目标在数据容器里，本机同名源自动配上）：由目标浏览器里
+            // 长按文件夹「选为文件夹目标」或右上角「确定」（没选中时 = 当前目录）创建。
             // 与文件夹模式共用同一份 folders 列表，语义一致（替换前整棵递归备份）。
+            // 文件模式下的「文件夹目标」：目标在数据容器里，本机同名源文件夹自动配上
             ForEach(model.folders) { folder in
                 Button {
-                    openFolderBrowser(for: folder)
+                    if folder.localPath.isEmpty {
+                        model.pickLocalFolder(for: folder.id, inBundle: false)
+                    } else {
+                        openFolderBrowser(for: folder)
+                    }
                 } label: {
                     FolderRow(folder: folder)
                 }
@@ -1893,6 +1959,11 @@ struct ReplaceWizardView: View {
                         openFolderBrowser(for: folder)
                     } label: {
                         Label("重新选择目标文件夹", systemImage: "folder")
+                    }
+                    Button {
+                        model.pickLocalFolder(for: folder.id, inBundle: false)
+                    } label: {
+                        Label("更换本机源文件夹", systemImage: "folder.badge.plus")
                     }
                     Button {
                         model.clearFolderTarget(for: folder.id)
@@ -1910,7 +1981,7 @@ struct ReplaceWizardView: View {
             Button {
                 openTargetFirst(inBundle: false)
             } label: {
-                Label("添加目标文件（浏览数据容器）", systemImage: "folder.badge.plus")
+                Label("添加目标文件 / 文件夹（浏览数据容器）", systemImage: "folder.badge.plus")
             }
 
             Button {
@@ -1921,7 +1992,7 @@ struct ReplaceWizardView: View {
         } header: {
             Text("替换文件 / 文件夹（目标优先 / 本机优先）")
         } footer: {
-            Text("目标优先：先点「添加目标文件」在目标 App 数据容器里挑出要替换掉的文件，App 会自动在本机找同名文件配上（同名多处会让你选，一个都没有会弹本机选择器）；这样绑定的目标路径会被**锁定**，不会被自动匹配改掉。本机优先：点「添加本机文件」，再按文件名自动匹配目标。**要替换整个文件夹**：在目标浏览器里进到那个文件夹，点右上角「选择此文件夹」→ 接着选本机源文件夹即可（镜像替换 + 递归备份，与文件夹模式同一套）。左滑从列表移除（文件本体留在 ReplaceInbox）。")
+            Text("**目标优先**：点「添加目标文件 / 文件夹」在目标 App 数据容器里挑出要替换的**文件或文件夹**（可多选；点文件=选中、点文件夹=进入、长按文件夹=把它选为目标；右上角「确定」= 有选中就提交选中的，没选中就把当前所在目录当目标）。每个目标都会在本机按同名自动配源（同名多处会让你选，一个都没有就点那一行挑本机文件/文件夹）。**本机优先**：点「添加本机文件」，再按文件名自动匹配目标。目标文件夹里多出来的文件怎么处理，由下面执行区的「多出来的文件：保留 / 删除」决定。左滑从列表移除（文件本体留在 ReplaceInbox）。")
         }
     }
 
@@ -1995,7 +2066,7 @@ struct ReplaceWizardView: View {
                 Label("添加文件夹…", systemImage: "folder.badge.plus")
             }
         } header: {
-            Text("源文件夹 → 目标文件夹（镜像替换）")
+            Text("源文件夹 → 目标文件夹")
         } footer: {
             Text("点某一行去浏览目标 App 目录，进到要替换的那个文件夹后点右上角「选择此文件夹」。执行时目标文件夹会被源文件夹整体替换（目标里源没有的旧文件会被移除），替换前强制整棵递归备份。")
         }
@@ -2037,20 +2108,16 @@ struct ReplaceWizardView: View {
                     .foregroundColor(.secondary)
             }
 
-            Picker("语义", selection: $model.bundleSemantics) {
-                ForEach(ReplaceBundleSemantics.allCases) { semantics in
-                    Text(semantics.title).tag(semantics)
-                }
-            }
-            .pickerStyle(.segmented)
+            // 「多出来的文件：保留 / 删除」这个选项统一在执行区，三种模式共用一份设置。
 
-            Text(model.bundleSemantics.subtitle)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-
-            if let folder = model.bundleFolder {
+            // .app 内部的文件夹目标（可多个）：每个绑一个本机同名源文件夹
+            ForEach(model.bundleFolders) { folder in
                 Button {
-                    openBundleFolderBrowser(for: folder)
+                    if folder.localPath.isEmpty {
+                        model.pickLocalFolder(for: folder.id, inBundle: true)
+                    } else {
+                        openBundleFolderBrowser(for: folder)
+                    }
                 } label: {
                     FolderRow(folder: folder)
                 }
@@ -2059,17 +2126,22 @@ struct ReplaceWizardView: View {
                     Button {
                         openBundleFolderBrowser(for: folder)
                     } label: {
-                        Label("选择目标文件夹", systemImage: "folder")
+                        Label("重新选择 .app 内的目标文件夹", systemImage: "folder")
                     }
                     Button {
-                        model.setBundleFolderTarget(path: "")
+                        model.pickLocalFolder(for: folder.id, inBundle: true)
+                    } label: {
+                        Label("更换本机源文件夹", systemImage: "folder.badge.plus")
+                    }
+                    Button {
+                        model.setBundleFolderTarget(path: "", for: folder.id)
                     } label: {
                         Label("清除绑定", systemImage: "xmark.circle")
                     }
                     Button(role: .destructive) {
-                        model.removeBundleFolder()
+                        model.removeBundleFolder(id: folder.id)
                     } label: {
-                        Label("移除源文件夹", systemImage: "trash")
+                        Label("从列表移除", systemImage: "trash")
                     }
                 }
             }
@@ -2077,8 +2149,7 @@ struct ReplaceWizardView: View {
             Button {
                 model.importBundleFolder()
             } label: {
-                Label(model.bundleFolder == nil ? "添加源文件夹（整包换 / 并入）" : "替换源文件夹…",
-                      systemImage: "folder.badge.plus")
+                Label("添加本机源文件夹（并进 .app / 换某个子目录）", systemImage: "folder.badge.plus")
             }
 
             if model.bundleFiles.isEmpty {
@@ -2138,7 +2209,7 @@ struct ReplaceWizardView: View {
             Button {
                 openTargetFirst(inBundle: true)
             } label: {
-                Label("添加目标文件（浏览 .app）", systemImage: "folder.badge.plus")
+                Label("添加目标文件 / 文件夹（浏览 .app）", systemImage: "folder.badge.plus")
             }
 
             Button {
@@ -2147,9 +2218,9 @@ struct ReplaceWizardView: View {
                 Label("添加本机文件（按名自动匹配 .app 内目标）", systemImage: "doc.badge.plus")
             }
         } header: {
-            Text("包体(.app) 内容")
+            Text("包体(.app) 内部的文件 / 文件夹")
         } footer: {
-            Text("目标固定为所选 App 的包体。**目标优先**：点「添加目标文件（浏览 .app）」在 .app 里挑出要替换掉的文件，App 会自动在本机找同名文件配上（多处会让你选，一个都没有会弹本机选择器），并把目标路径锁定；**本机优先**：点「添加本机文件」，再按文件名自动匹配 .app 内的目标。\(model.bundleSemantics == .mirror ? "镜像替换会把 .app 里你这份没有的文件删掉。" : "合并只覆盖同名文件，其余保持不动（改 .app 更安全）。")执行前强制整棵递归备份。⚠️ 改自签 App 的包体会破坏签名校验，可能导致它直接打不开；动手前确认你有重装手段（回滚需要备份完好）。")
+            Text("这里**不是**「替换整个 .app」：点「添加目标文件 / 文件夹（浏览 .app）」进 .app 里挑出要替换的文件**或文件夹**（可多选），App 会自动在本机找同名源配上（多处会让你选，一个都没有就点那一行挑本机文件/文件夹）。也可以点「添加本机文件」让它们按文件名自动匹配 .app 内的目标。目标文件夹里多出来的文件怎么处理，由下面执行区的「多出来的文件：保留 / 删除」决定。执行前强制整棵递归备份。⚠️ 改自签 App 的包体会破坏签名校验，可能导致它直接打不开；动手前确认你有重装手段（回滚需要备份完好）。")
         }
     }
 
@@ -2272,18 +2343,28 @@ struct ReplaceWizardView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("执行前自动备份")
                         .font(.subheadline)
-                    Text(model.mode == .files
-                         ? (model.autoBackup
-                            ? "覆盖前把原件整份存到 Documents/Backups，随时可一键回滚"
-                            : "已关闭：覆盖后没有回滚兜底")
-                         : (model.mode == .folders
-                            ? "文件夹模式强制开启：目标文件夹会被整棵递归备份"
-                            : "包体模式强制开启：.app 会被整棵递归备份"))
+                    Text(model.autoBackup
+                         ? "覆盖前把原件整份存到 Documents/Backups，随时可一键回滚"
+                         : "已关闭：覆盖后没有回滚兜底")
                         .font(.caption2)
                         .foregroundColor(model.autoBackup ? .secondary : .orange)
                 }
             }
-            .disabled(model.mode != .files)
+            .disabled(model.hasFolderTargets)
+
+            // 「目标文件夹里多出来的文件」：三种模式共用同一个选项（有文件夹类目标时才出现）
+            if model.hasFolderTargets {
+                Picker("目标文件夹里多出来的文件", selection: $model.extraFilesPolicy) {
+                    ForEach(ReplaceExtraFilesPolicy.allCases) { policy in
+                        Text(policy.title).tag(policy)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(model.extraFilesPolicy.subtitle)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
 
             HStack {
                 Text(model.mode == .files ? "待替换文件" : (model.mode == .folders ? "待替换文件夹" : "待替换内容"))
@@ -2292,15 +2373,20 @@ struct ReplaceWizardView: View {
                     .foregroundColor(model.currentBoundCount > 0 ? .secondary : .orange)
             }
         } footer: {
-            switch model.mode {
-            case .files:
-                Text(model.autoBackup
-                     ? "执行前会把每个被覆盖的目标整份备份到 Documents/Backups；写之前自动把目标父目录属主改成 mobile:mobile。"
-                     : "⚠️ 自动备份已关闭：覆盖后无法回滚，需要兜底就把上面的开关打开。")
-            case .folders:
-                Text("文件夹模式为镜像替换：目标文件夹里源没有的旧文件会被移除。替换前会把整个目标文件夹递归备份到 Documents/Backups，写之前自动把目标父目录属主改成 mobile:mobile。")
-            case .bundle:
-                Text("包体模式会把整个 .app 递归备份到 Documents/Backups，写之前自动把包体父目录属主改成 mobile:mobile。改自签 App 的包体可能让它打不开，回滚需要备份完好。")
+            VStack(alignment: .leading, spacing: 4) {
+                if model.hasFolderTargets {
+                    Text("「目标文件夹里多出来的文件」只对文件夹类目标生效：选「保留」就只覆盖同名文件（默认，最安全）；选「删除」就让目标文件夹和你的源保持一致——目标里源没有的文件会被移除。")
+                }
+                switch model.mode {
+                case .files:
+                    Text(model.autoBackup
+                         ? "执行前会把每个被覆盖的目标整份备份到 Documents/Backups；写之前自动把目标父目录属主改成 mobile:mobile。"
+                         : "⚠️ 自动备份已关闭：覆盖后无法回滚，需要兜底就把上面的开关打开。")
+                case .folders:
+                    Text("替换前会把每个目标文件夹整棵递归备份到 Documents/Backups，写之前自动把目标父目录属主改成 mobile:mobile。")
+                case .bundle:
+                    Text("包体模式的目标在 .app 内部，替换前整棵递归备份到 Documents/Backups，写之前自动把包体父目录属主改成 mobile:mobile。改自签 App 的包体可能让它打不开，回滚需要备份完好。")
+                }
             }
         }
     }
@@ -2469,6 +2555,10 @@ private struct WizardFileRow: View {
 
             Spacer()
 
+            Text("文件")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
             if file.state == .ambiguous || file.state == .notFound {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundColor(.orange)
@@ -2549,11 +2639,13 @@ private struct SavedTaskRow: View {
 private struct FolderRow: View {
     let folder: ReplaceWizardModel.WizardFolder
 
+    private var needsLocalSource: Bool { folder.localPath.isEmpty }
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: folder.targetPath == nil ? "folder" : "folder.fill")
                 .font(.title3)
-                .foregroundColor(folder.targetPath == nil ? .orange : .accentColor)
+                .foregroundColor(needsLocalSource || folder.targetPath == nil ? .orange : .accentColor)
                 .frame(width: 28)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -2562,9 +2654,16 @@ private struct FolderRow: View {
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("\(folder.itemCount) 个文件 · \(folder.sizeText)")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                if needsLocalSource {
+                    Text("还没配本机源文件夹：点这一行挑一个")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .lineLimit(1)
+                } else {
+                    Text("\(folder.itemCount) 个文件 · \(folder.sizeText)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
                 Text(folder.hintText)
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundColor(folder.targetPath == nil ? .orange : .secondary)
@@ -2574,7 +2673,11 @@ private struct FolderRow: View {
 
             Spacer()
 
-            if folder.targetPath == nil {
+            Text("文件夹")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            if folder.targetPath == nil || needsLocalSource {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundColor(.orange)
             }

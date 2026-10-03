@@ -251,7 +251,7 @@ final class RecipeRunner {
                             destExists ? (apply ? "已覆盖（原文件已备份）" : "将覆盖已有文件") : "新建")
 
             case "replacedir":
-                // 文件夹模式：镜像替换整个目录（目标里源没有的旧文件会被移除）
+                // 「多出来的文件：删除」：把 dest 现有内容整棵删掉，再把 source 整棵拷进去
                 guard let sourcePath = sourcePath, let destPath = destPath else {
                     return make("参数不完整", .failed, "source/dest 不能为空")
                 }
@@ -277,11 +277,11 @@ final class RecipeRunner {
                 return make("\((sourcePath as NSString).lastPathComponent) → \(destPath)",
                             apply ? .ok : .planned,
                             dirDestExists
-                                ? (apply ? "已镜像替换（原目录整棵已备份，旧文件已移除）" : "将镜像覆盖整个文件夹（旧文件会被移除）")
+                                ? (apply ? "已替换整个文件夹（原目录整棵已备份，多出来的旧文件已移除）" : "将替换整个文件夹（多出来的旧文件会被移除）")
                                 : (apply ? "已新建" : "将新建"))
 
             case "mergedir":
-                // 合并语义：只把源里有的文件写过去，目标里其余文件保持不动（改 .app 更安全）
+                // 「多出来的文件：保留」：只把源里有的文件写过去，目标里其余文件保持不动
                 guard let sourcePath = sourcePath, let destPath = destPath else {
                     return make("参数不完整", .failed, "source/dest 不能为空")
                 }
@@ -307,7 +307,7 @@ final class RecipeRunner {
                 return make("\((sourcePath as NSString).lastPathComponent) → \(destPath)",
                             apply ? .ok : .planned,
                             mergeDestExists
-                                ? (apply ? "已合并（同名文件已覆盖，原目录整棵已备份）" : "将覆盖同名文件，目标里其它文件保留")
+                                ? (apply ? "已覆盖同名文件（原目录整棵已备份，目标里其余文件保留）" : "将覆盖同名文件，目标里其余文件保留")
                                 : (apply ? "已新建" : "将新建"))
 
             case "mkdir":

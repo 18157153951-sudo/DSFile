@@ -2,7 +2,7 @@
 //  ReplaceTask.swift — 「替换」页的共享任务模型
 //
 //  这里放五样东西，供向导页与任务执行共用，避免两套逻辑：
-//    1) ReplaceMode / ReplaceBundleSemantics / 绑定结构体 —— 三种模式的数据
+//    1) ReplaceMode / ReplaceExtraFilesPolicy / 绑定结构体 —— 三种模式的数据
 //    2) ReplaceAutoTask                                   —— 一份「替换配置」（模式 + 目标 + 绑定 + 语义 + 备份开关）
 //    3) ReplaceSavedTask + ReplaceTaskStore                —— 用户显式保存的自动化任务（Documents/AutoTasks/tasks.json）
 //    4) ReplaceTaskBuilder                                —— 把配置组装成 ScriptRecipe 并交给既有 RecipeRunner
@@ -54,34 +54,37 @@ enum ReplaceMode: String, Codable, CaseIterable, Identifiable {
     static let runPrefix = "一键替换"
 }
 
-/// 包体(.app)模式的语义
-enum ReplaceBundleSemantics: String, Codable, CaseIterable, Identifiable {
-    /// 镜像：删掉目标现有内容再整棵拷过去（目标里源没有的文件会被移除）
-    case mirror
-    /// 合并：只覆盖同名文件，目标里其余文件保持不动（改 .app 更安全，默认推荐）
-    case merge
+/// 「目标文件夹里多出来的文件」怎么处理。
+///
+/// 0.4.0 起界面**只暴露这一个选项**（原来的「镜像替换 / 仅覆盖同名」两个模式已删除）：
+///   · 保留（默认，最安全）：只覆盖同名文件，目标文件夹里其余文件保持不动；
+///   · 删除：让目标文件夹与源保持一致——目标里源没有的文件会被移除。
+/// 底层仍然是两个既有 op：保留 → mergeDir，删除 → replaceDir。
+enum ReplaceExtraFilesPolicy: String, Codable, CaseIterable, Identifiable {
+    case keep
+    case delete
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .mirror: return "镜像替换"
-        case .merge: return "仅覆盖同名文件"
+        case .keep: return "保留"
+        case .delete: return "删除"
         }
     }
 
     var subtitle: String {
         switch self {
-        case .mirror: return "整个 .app 换掉：目标里源没有的文件会被移除"
-        case .merge: return "合并：只覆盖同名文件，其余保持不动（推荐）"
+        case .keep: return "只覆盖同名文件，目标文件夹里其余文件保持不动（默认，最安全）"
+        case .delete: return "让目标文件夹与源保持一致：目标里源没有的文件会被移除"
         }
     }
 
     /// 对应的配方 op
     var opName: String {
         switch self {
-        case .mirror: return "replaceDir"
-        case .merge: return "mergeDir"
+        case .keep: return "mergeDir"
+        case .delete: return "replaceDir"
         }
     }
 }
@@ -111,25 +114,21 @@ struct ReplaceAutoTask: Codable, Hashable {
     var executableName: String
 
     var mode: ReplaceMode
-    /// 文件模式：逐个文件；包体模式：按文件名匹配进 .app 的文件
+    /// 文件模式 / 包体模式：逐个文件的目标绑定
     var files: [ReplaceFileBinding]
-    /// 文件夹模式：整目录镜像；包体模式：最多一个源文件夹（换/并入整个 .app）
+    /// 文件夹类目标：文件夹模式是"源文件夹→目标文件夹"；文件 / 包体模式是"目标里的文件夹 → 本机同名源文件夹"
     var folders: [ReplaceFolderBinding]
-    /// 仅包体模式使用；旧数据没有这个字段时为 nil（按镜像处理）
-    var semantics: ReplaceBundleSemantics?
+    /// 目标文件夹里多出来的文件：保留 / 删除。旧数据没有这个字段时为 nil（按"保留"处理，最安全）
+    var extraFiles: ReplaceExtraFilesPolicy?
     /// 执行前是否备份（运行任务时一律强制为 true）
     var backup: Bool
     var updatedAt: Date
 
-    var effectiveSemantics: ReplaceBundleSemantics { semantics ?? .mirror }
+    var effectiveExtraFiles: ReplaceExtraFilesPolicy { extraFiles ?? .keep }
 
     var itemCount: Int {
-        switch mode {
-        // 文件模式也允许「文件夹绑定」（整目录镜像替换），所以两边条目都要算上
-        case .files: return files.count + folders.count
-        case .folders: return folders.count
-        case .bundle: return files.count + (folders.isEmpty ? 0 : 1)
-        }
+        // 三种模式都是「文件绑定 + 文件夹绑定」，统一算
+        files.count + folders.count
     }
 
     var isEmpty: Bool { itemCount == 0 }
@@ -161,8 +160,8 @@ struct ReplaceSavedTask: Codable, Identifiable, Hashable {
     /// 列表行里显示的元信息
     var summary: String {
         var parts: [String] = [task.mode.title]
-        if task.mode == .bundle {
-            parts.append(task.effectiveSemantics.title)
+        if !task.folders.isEmpty {
+            parts.append("多出文件：\(task.effectiveExtraFiles.title)")
         }
         parts.append("\(task.itemCount) 项")
         parts.append(task.backup ? "已备份" : "不备份")
@@ -316,39 +315,28 @@ enum ReplaceTaskBuilder {
                                            optional: false))
         }
 
-        if task.mode == .folders || task.mode == .files {
-            // 文件模式里的「文件夹绑定」与文件夹模式语义一致：整目录镜像替换（替换前递归备份）
-            for binding in task.folders {
-                steps.append(ScriptRecipe.Step(op: "replaceDir",
-                                               source: binding.localPath,
-                                               dest: binding.targetPath,
-                                               mode: nil,
-                                               owner: nil,
-                                               note: nil,
-                                               optional: false))
-            }
-        } else if task.mode == .bundle {
-            // 包体模式的源文件夹：镜像或合并进 .app（op 由语义决定）
-            let op = task.effectiveSemantics.opName
-            for binding in task.folders {
-                steps.append(ScriptRecipe.Step(op: op,
-                                               source: binding.localPath,
-                                               dest: binding.targetPath,
-                                               mode: nil,
-                                               owner: nil,
-                                               note: nil,
-                                               optional: false))
-            }
+        // 文件夹类目标：三种模式统一按「目标文件夹里多出来的文件：保留 / 删除」决定 op
+        //   保留 → mergeDir（只覆盖同名文件，其余保持不动）
+        //   删除 → replaceDir（让目标文件夹与源保持一致）
+        let folderOp = task.effectiveExtraFiles.opName
+        for binding in task.folders {
+            steps.append(ScriptRecipe.Step(op: folderOp,
+                                           source: binding.localPath,
+                                           dest: binding.targetPath,
+                                           mode: nil,
+                                           owner: nil,
+                                           note: nil,
+                                           optional: false))
         }
 
         let note: String
         switch task.mode {
         case .files:
-            note = "由「替换」页向导生成：文件替换前会整份备份；若含文件夹绑定，则按整目录镜像替换并递归备份。"
+            note = "由「替换」页向导生成：文件替换前会整份备份；文件夹类目标按「多出来的文件：\(task.effectiveExtraFiles.title)」处理，替换前递归备份。"
         case .folders:
-            note = "由「替换」页文件夹模式生成：整个目标文件夹会被镜像替换，替换前递归备份。"
+            note = "由「替换」页文件夹模式生成：目标文件夹里多出来的文件会「\(task.effectiveExtraFiles.title)」；替换前整棵递归备份。"
         case .bundle:
-            note = "由「替换」页包体(.app)模式生成：语义为\(task.effectiveSemantics.title)，替换前整棵递归备份。"
+            note = "由「替换」页包体(.app)模式生成：在 .app 内部按文件 / 文件夹替换，多出来的文件会「\(task.effectiveExtraFiles.title)」；替换前整棵递归备份。"
         }
 
         return ScriptRecipe(schema: 1,
