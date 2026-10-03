@@ -11,6 +11,8 @@
 
 #import <dlfcn.h>
 #import <stdlib.h>
+#import <string.h>
+#import <stdarg.h>
 #import <xpc/xpc.h>
 
 const uint64_t DSMCMClassAppData = 2;                  // PoC: app-data container
@@ -116,19 +118,19 @@ NSString *DSMCMMissingSymbols(void)
     DSMCMAPI *api = DSMCMSharedAPI();
     NSMutableArray<NSString *> *missing = [NSMutableArray array];
 #define DSMCM_CHECK(field, name) if (api->field == NULL) [missing addObject:@name]
-    DSMCM_CHECK(queryCreate, @"container_query_create");
-    DSMCM_CHECK(querySetClass, @"container_query_set_class");
-    DSMCM_CHECK(querySetIdentifiers, @"container_query_set_identifiers");
-    DSMCM_CHECK(querySetGroupIdentifiers, @"container_query_set_group_identifiers");
-    DSMCM_CHECK(querySetFlags, @"container_query_operation_set_flags");
-    DSMCM_CHECK(queryGetSingle, @"container_query_get_single_result");
-    DSMCM_CHECK(queryGetLastError, @"container_query_get_last_error");
-    DSMCM_CHECK(queryFree, @"container_query_free");
-    DSMCM_CHECK(objectGetPath, @"container_object_get_path");
-    DSMCM_CHECK(objectCopy, @"container_object_copy");
-    DSMCM_CHECK(objectCopyToken, @"container_copy_sandbox_token");
-    DSMCM_CHECK(objectActivate, @"container_object_sandbox_extension_activate");
-    DSMCM_CHECK(objectFree, @"container_object_free");
+    DSMCM_CHECK(queryCreate, "container_query_create");
+    DSMCM_CHECK(querySetClass, "container_query_set_class");
+    DSMCM_CHECK(querySetIdentifiers, "container_query_set_identifiers");
+    DSMCM_CHECK(querySetGroupIdentifiers, "container_query_set_group_identifiers");
+    DSMCM_CHECK(querySetFlags, "container_query_operation_set_flags");
+    DSMCM_CHECK(queryGetSingle, "container_query_get_single_result");
+    DSMCM_CHECK(queryGetLastError, "container_query_get_last_error");
+    DSMCM_CHECK(queryFree, "container_query_free");
+    DSMCM_CHECK(objectGetPath, "container_object_get_path");
+    DSMCM_CHECK(objectCopy, "container_object_copy");
+    DSMCM_CHECK(objectCopyToken, "container_copy_sandbox_token");
+    DSMCM_CHECK(objectActivate, "container_object_sandbox_extension_activate");
+    DSMCM_CHECK(objectFree, "container_object_free");
 #undef DSMCM_CHECK
     if (api->queryIterate == NULL) [missing addObject:@"container_query_iterate_results_sync(枚举用)"];
     if (api->objectGetIdentifier == NULL) [missing addObject:@"container_object_get_identifier(枚举用)"];
