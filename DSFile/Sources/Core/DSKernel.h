@@ -51,6 +51,9 @@ typedef void (^DSKernelLogBlock)(NSString *line);
 + (BOOL)probeFilesystemAccess NS_SWIFT_NAME(probeFilesystemAccess());
 /// 内核基址（0 表示还没拿到）
 + (unsigned long long)kernelBase NS_SWIFT_NAME(kernelBase());
+/// 本次进程**实际走通**的是哪条路，例如「MHA · 零内核」/「内核 + cred 逃逸（FilzaJailedDS）」；
+/// 还没成功时返回 nil。界面上用它标注当前生效的路径。
++ (nullable NSString *)activePathDescription NS_SWIFT_NAME(activePathDescription());
 /// 现场把关键诊断信息打成文本，方便用户回传日志
 + (NSString *)diagnosticsText NS_SWIFT_NAME(diagnosticsText());
 

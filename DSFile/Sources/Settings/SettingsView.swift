@@ -43,11 +43,18 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.7.3"
+    private static let appVersion = "0.7.4"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.7.4", date: "2026-10-04", items: [
+            "**两条路共存 + 用户自己切换**：设置页新增「访问路径」三选一 —— **自动（推荐）/ 仅 MHA（零内核）/ 仅内核（FilzaJailedDS）**，选择会持久化，每次激活都把「当前选择 + 实际走的路径」写进日志",
+            "**修掉 0.7.3 的错报成功**：MHA 路径以前把「持有租约数 > 0」当成成功（真机日志里明明只拿到自己一个容器、写探针 `EPERM`，却打了 `沙盒逃逸成功`）—— 现在成功判据是**真的能写沙盒外**或**真的拿到别人的容器（App 数据容器 > 1 个）**，只看租约不算",
+            "**MHA 路径加了签名门槛**：MCM 的授权键是签名里的 CodeDirectory identifier，所以签名 identifier 不是 `com.apple.mobile.MobileHouseArrest` 时**连 MCM 都不尝试**，直接如实失败并给出原因与修复指引",
+            "**「仅 MHA」绝不静默回退内核**：选它时 MHA 不可用会**明确失败**并说明原因；「自动」才会在 MHA 不可用时回退到你选的内核后端；「仅内核」完全跳过 MHA，行为与 0.6.2 逐字一致",
+            "**界面直接标注当前生效路径**：设置页显示「当前生效路径：MHA · 零内核」或「内核 + cred 逃逸（FilzaJailedDS）」，未激活时显示「尚未激活」；同时用真实签名信息说明本包能不能走 MHA"
+        ]),
         ChangeEntry(version: "0.7.3", date: "2026-10-04", items: [
             "**新增「签名 identifier」诊断**（真机反馈的下一跳）：MCM 的授权键是**签名时的 CodeDirectory identifier**，所以只把 `CFBundleIdentifier` 改成 `com.apple.mobile.MobileHouseArrest` 是不够的 —— 真机上的表现正是「只能枚举到 1 个容器（=自己）+ 沙盒外写探针失败」",
             "**日志里直接给结论**：启动时与 MHA 路径开始时各打一次，格式为 `[MHA 诊断] 签名 identifier = <值>（期望 com.apple.mobile.MobileHouseArrest）→ 匹配 / 不匹配 / 无法判断`，并附带 `TeamIdentifier`、`application-identifier` 与 `csops` 原始值",
@@ -268,6 +275,36 @@ struct SettingsView: View {
     /// 与 DS3105Kernel.h 的 DSSafeModeDefaultsKey 保持一致：安全模式（任何模式都不跑内核漏洞，**默认关**）
     @AppStorage("myfilza.safeMode") private var safeMode: Bool = false
 
+    // MARK: 访问路径（自动 / 仅 MHA / 仅内核）—— 与 DS3105Kernel.h 的常量保持一致
+
+    /// 与 DSKernelPathModeDefaultsKey 一致；默认 "auto"
+    @AppStorage("myfilza.pathMode") private var pathMode: String = "auto"
+
+    private static let pathModeAutoValue   = "auto"
+    private static let pathModeMHAValue    = "mha"
+    private static let pathModeKernelValue = "kernel"
+
+    private static let mhaBundleID = "com.apple.mobile.MobileHouseArrest"
+
+    /// 本包到底能不能走 MHA —— 用**真实**签名信息说清楚（不猜）
+    private var mhaIdentityStateText: String {
+        let bid = Bundle.main.bundleIdentifier ?? "(nil)"
+        if bid != Self.mhaBundleID {
+            return "本包 bundle id = \(bid)（不是 \(Self.mhaBundleID)）→ MHA 路径不适用："
+                 + "选「自动」会直接走内核；选「仅 MHA」会明确失败并说明原因。"
+        }
+        switch DSSignatureIdentifierMatchesMHA() {
+        case 1:
+            return "签名 identifier = \(DSSignatureIdentifier() ?? "?") ✓ 与 MHA 一致 —— MHA 路径可用。"
+        case 0:
+            return "签名 identifier = \(DSSignatureIdentifier() ?? "读取不到") ✗ 不是 MHA —— "
+                 + "MCM 只会给你自己的容器、特权 profile 也不会下发，MHA 路径不会生效。"
+                 + "请在签名工具里把 Bundle ID / Signing Identifier 设为 \(Self.mhaBundleID)（不要用「自动生成」）。"
+        default:
+            return "签名 identifier 读取不到；MHA 是否生效将由**真实探针**判定，不会自报成功。"
+        }
+    }
+
     private var backendSection: some View {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let major = v.majorVersion, minor = v.minorVersion, patch = v.patchVersion
@@ -285,6 +322,40 @@ struct SettingsView: View {
         let selectedInRange = using3105 ? t3105InRange : filzaInRange
 
         return Section {
+            // ---- 访问路径：用户自己切换，手动优先，绝不被"自动回退"覆盖 ----
+            Picker("访问路径", selection: $pathMode) {
+                Text("自动（推荐）").tag(Self.pathModeAutoValue)
+                Text("仅 MHA（零内核）").tag(Self.pathModeMHAValue)
+                Text("仅内核").tag(Self.pathModeKernelValue)
+            }
+            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 4) {
+                switch pathMode {
+                case Self.pathModeMHAValue:
+                    Text("只走 MHA（零内核）：订阅式容器访问，**完全不执行内核代码**。"
+                         + "不可用时（签名 identifier 不是 MHA / 拿不到别人的容器）会**明确失败并说明原因**，"
+                         + "**绝不静默回退内核**。")
+                case Self.pathModeKernelValue:
+                    Text("只走内核：完全跳过 MHA（连检测都不做），直接走下面选定的内核后端 —— "
+                         + "默认 FilzaJailedDS，行为与 0.6.2 一致。")
+                default:
+                    Text("自动（推荐）：MHA 真的可用（签名 identifier 就是 MHA，且能读到别人的容器）才用它；"
+                         + "否则自动回退到你下面选的内核后端。")
+                }
+                Text(mhaIdentityStateText)
+                    .foregroundColor(.secondary)
+                if let active = DSKernel.activePathDescription() {
+                    Label("当前生效路径：\(active)", systemImage: "checkmark.seal.fill")
+                        .foregroundColor(.green)
+                } else {
+                    Label("当前生效路径：尚未激活", systemImage: "circle.dashed")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .font(.caption2)
+            .fixedSize(horizontal: false, vertical: true)
+
             Picker("内核模式", selection: $kernelBackend) {
                 Text("FilzaJailedDS 2.2").tag(Self.backendFilzaValue)
                 Text("3105").tag(Self.backend3105Value)

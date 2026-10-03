@@ -99,6 +99,12 @@ static BOOL gExploitRunning = NO;
 static BOOL gExploitAttempted = NO;
 static BOOL gExploitDone    = NO;
 static BOOL gEscaped        = NO;
+/// 本次进程实际走通的是哪条路（供界面/日志展示）；nil = 还没成功
+static NSString *gActivePath = nil;
+/// 最近一次 MHA 路径失败的原因（供「仅 MHA」模式如实报错，不静默回退）
+static NSString *gLastMHAFailureReason = nil;
+
+NSString * _Nullable DSKernelActivePathDescription(void) { return gActivePath; }
 static NSError *gLastError  = nil;
 // 逃逸/提权不再需要 self proc：旧版缓存的上游 proc_self() 结果已弃用（本机必然野读 0x378 → exit）。
 
@@ -324,8 +330,11 @@ static uint32_t ds_cpu_family(void)
 + (BOOL)isEscaped { return gEscaped; }
 + (BOOL)isExploitDone { return gExploitDone; }
 + (BOOL)isRunningAsRoot { return getuid() == 0; }
-+ (BOOL)probeFilesystemAccess { return ds_probe_write_access() || DSMHAActivatedLeaseCount() > 0; }
++ (BOOL)probeFilesystemAccess { return ds_probe_write_access() || DSMHAAccessProbePasses(); }
 + (unsigned long long)kernelBase { return (unsigned long long)g_kernel_base; }
+
+/// 本次进程实际走通的是哪条路（供设置页/日志标注「MHA · 零内核」或「内核 + cred 逃逸」）
++ (nullable NSString *)activePathDescription { return gActivePath; }
 
 + (NSString *)diagnosticsText
 {
@@ -407,6 +416,7 @@ static uint32_t ds_cpu_family(void)
         gEscaped = ds_probe_write_access();
         if (log) log([NSString stringWithFormat:@"[myfilza] %@", detail ?: @"3105 后端完成"]);
         if (gEscaped) {
+            gActivePath = @"内核 + cred 逃逸（3105 后端）";
             if (log) log(@"[myfilza] *** 沙盒逃逸成功（3105 模式）：现在可以读写沙盒外的路径 ***");
             [[NSNotificationCenter defaultCenter] postNotificationName:@"myfilza.fileSystemAccessChanged" object:nil];
             return DSKernelResultOK;
@@ -455,19 +465,24 @@ static uint32_t ds_cpu_family(void)
 
     if (ret == 0) {
         gExploitDone = YES;
-        // 成功判据：容器租约已激活并持有（普通文件 API 可用）**或**沙盒外写探针通过
-        gEscaped = ds_probe_write_access() || DSMHAActivatedLeaseCount() > 0;
+        // 成功判据与 DSMHAKernelActivate 内部保持一致：**真的**能写沙盒外，或**真的**拿到了别人的容器。
+        // 注意：不能只看"持有租约数 > 0"——那正是 0.7.3 自报成功的 bug。
+        gEscaped = ds_probe_write_access() || DSMHAAccessProbePasses();
         if (log) log([NSString stringWithFormat:@"[myfilza] %@", detail ?: @"MHA 路径完成"]);
         if (gEscaped) {
-            if (log) log(@"[myfilza] *** 沙盒逃逸成功（MHA 身份 · 零内核）：容器租约已生效，"
+            gActivePath = @"MHA · 零内核";
+            if (log) log(@"[myfilza] *** 沙盒逃逸成功（MHA 身份 · 零内核）：沙盒扩展已生效，"
                           @"现在可以读写其它 App 的容器 ***");
             [[NSNotificationCenter defaultCenter] postNotificationName:@"myfilza.fileSystemAccessChanged" object:nil];
             return DSKernelResultOK;
         }
-        if (log) log(@"[myfilza] MHA 租约已激活，但沙盒外写探针失败——仍需内核路径");
+        gLastMHAFailureReason = detail ?: @"MHA 探针未通过（没拿到别人的容器）";
+        if (log) log(@"[myfilza] MHA 激活完成但**未真正生效**（没拿到别人的容器 / 沙盒外写仍失败）"
+                      @"——是否回退内核由「访问路径」选择决定");
         return DSKernelResultEscapeFailed;
     }
 
+    gLastMHAFailureReason = detail ?: @"未提供原因";
     if (log) log([NSString stringWithFormat:@"[myfilza] MHA 路径未成功（阶段：%@）：%@",
                   DSMHALastStage(), detail ?: @"未提供原因"]);
     return DSKernelResultExploitFailed;
@@ -487,14 +502,47 @@ static uint32_t ds_cpu_family(void)
     @try {
         if (log) ds_capture_start(log);
 
-        // === 分派点 1：MHA 身份（零内核）优先。只有 bundle id 就是 MHA 时才尝试；
-        //     成功即采用它的结果；失败**不阻断**，继续走下面的模式选择。 ===
+        // === 分派点 1：访问路径（用户可选：自动 / 仅 MHA / 仅内核）===
+        //   Auto       —— MHA 可用才用 MHA，否则自动回退所选内核后端；
+        //   MHAOnly    —— 只走 MHA，不可用就**明确失败**，绝不静默回退内核；
+        //   KernelOnly —— 完全跳过 MHA（连检测/尝试都不做），直接走内核后端。
+        DSKernelPathMode pathMode = DSKernelPathModeCurrent();
+        if (log) log([NSString stringWithFormat:@"[myfilza] 访问路径选择：%@",
+                      DSKernelPathModeDisplayName(pathMode)]);
+
         DSKernelResult mhaResult = DSKernelResultInternalError;
-        if (DSMHAIsHost()) {
+        BOOL mhaAttempted = NO;
+
+        if (pathMode == DSKernelPathModeKernelOnly) {
+            if (log) log(@"[myfilza] 「仅内核」：完全跳过 MHA 路径（不检测、不尝试），直接走所选内核后端");
+        } else if (!DSMHAIsHost()) {
+            if (log) log([NSString stringWithFormat:
+                          @"[myfilza] MHA 路径不适用：本 App bundle id 是 %@，不是 com.apple.mobile.MobileHouseArrest%@",
+                          NSBundle.mainBundle.bundleIdentifier ?: @"(nil)",
+                          (pathMode == DSKernelPathModeMHAOnly)
+                              ? @"（你选的是「仅 MHA」，按选择将明确失败，不回退内核）"
+                              : @" → 自动回退内核模式"]);
+        } else {
+            mhaAttempted = YES;
             mhaResult = [self ds_activateMHAWithLog:log];
         }
-        if (mhaResult == DSKernelResultOK || mhaResult == DSKernelResultAlreadyActive) {
+
+        if (mhaAttempted && (mhaResult == DSKernelResultOK || mhaResult == DSKernelResultAlreadyActive)) {
             result = mhaResult;
+        } else if (pathMode == DSKernelPathModeMHAOnly) {
+            // 用户明确要求：只在 MHA 上运行 —— 不可用时明确失败，**不回退内核**。
+            if (log) {
+                log([NSString stringWithFormat:@"[myfilza] 「仅 MHA（零内核）」失败（阶段：%@）：%@",
+                     DSMHALastStage(), gLastMHAFailureReason ?: @"未提供原因"]);
+                log(@"[myfilza] 按你的选择**不回退内核**。要让 MHA 生效：请用签名 identifier 为 "
+                      "com.apple.mobile.MobileHouseArrest 的证书重签（且不要用「自动生成 Bundle ID」）；"
+                      "或者把访问路径改成「自动（推荐）」/「仅内核（FilzaJailedDS）」。");
+            }
+            gLastError = [NSError errorWithDomain:@"myfilza"
+                                             code:DSKernelResultEscapeFailed
+                                         userInfo:@{ NSLocalizedDescriptionKey:
+                                                     (gLastMHAFailureReason ?: @"仅 MHA 模式失败：MHA 路径不可用") }];
+            result = DSKernelResultEscapeFailed;
         // === 分派点 2：选了 3105 就整条走 3105 的独立路径，绝不进入下面的 FilzaJailedDS 逻辑 ===
         // （未选中时这个 if 恒为假，下面的代码与 0.4.0 逐字一致）
         } else if (DS3105KernelSelected()) {
@@ -566,6 +614,18 @@ static uint32_t ds_cpu_family(void)
         @synchronized (self) { gExploitRunning = NO; }
     }
 
+    // 收尾：如实写明"这次实际走的是哪条路"，界面与日志都以它为准（不猜、不美化）
+    if (result == DSKernelResultOK || result == DSKernelResultAlreadyActive) {
+        NSString *path = gActivePath ?: (gEscaped ? @"已具备沙盒外访问（进程内先前已取得）" : @"未知");
+        if (log) log([NSString stringWithFormat:@"[myfilza] ✅ 本次实际路径 = %@", path]);
+    } else if (log) {
+        log([NSString stringWithFormat:@"[myfilza] ❌ 激活未成功（结果码 %ld）；访问路径选择 = %@",
+             (long)result, DSKernelPathModeDisplayName(DSKernelPathModeCurrent())]);
+        if (gLastMHAFailureReason.length > 0) {
+            log([NSString stringWithFormat:@"[myfilza] MHA 路径失败原因：%@", gLastMHAFailureReason]);
+        }
+    }
+
     return result;
 }
 
@@ -624,7 +684,10 @@ static uint32_t ds_cpu_family(void)
 
     if (ds_probe_write_access()) {
         gEscaped = YES;
-        if (log) log(@"[myfilza] *** 沙盒逃逸成功：现在可以读写沙盒外的路径 ***");
+        gActivePath = DS3105KernelSelected() ? @"内核 + cred 逃逸（3105 后端）"
+                                             : @"内核 + cred 逃逸（FilzaJailedDS）";
+        if (log) log([NSString stringWithFormat:@"[myfilza] *** 沙盒逃逸成功（%@）：现在可以读写沙盒外的路径 ***",
+                      gActivePath]);
         return DSKernelResultOK;
     }
 

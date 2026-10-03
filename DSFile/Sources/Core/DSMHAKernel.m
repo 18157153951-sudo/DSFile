@@ -29,9 +29,14 @@ static const NSUInteger kMHAEnumLimitAppGroup = 256;
 static NSMutableArray<DSMCMLease *> *gMHALeases = nil;
 static NSString *gMHALastStage = @"未开始";
 static NSUInteger gMHAActivatedCount = 0;
+/// 其中 class 2（App 数据容器）的条数：只有 1 条（=自己）说明签名 identifier 不是 MHA
+static NSUInteger gMHAAppDataCount = 0;
 
 NSString *DSMHALastStage(void) { return gMHALastStage; }
 NSUInteger DSMHAActivatedLeaseCount(void) { return gMHAActivatedCount; }
+NSUInteger DSMHAAppDataLeaseCount(void) { return gMHAAppDataCount; }
+
+NSInteger DSMHASignatureIsMHA(void) { return DSSignatureIdentifierMatchesMHA(); }
 
 static void mha_stage(NSString *stage)
 {
@@ -76,6 +81,30 @@ static BOOL mha_probe_read_directory(NSString *path, NSUInteger *countOut)
     return YES;
 }
 
+/// 真实权限探针：在**别人**的租约容器根里写一个临时文件再删掉。
+/// 注意：**必须跳过自己的容器**（自己的容器本来就可写，拿它当判据会自报成功）。
+/// 只有租约（沙盒扩展）确实生效、且拿到的是别人的容器时才会返回 YES。
+BOOL DSMHAAccessProbePasses(void)
+{
+    NSString *ownIdentifier = NSBundle.mainBundle.bundleIdentifier ?: @"";
+    for (DSMCMLease *lease in gMHALeases) {
+        if (lease.rootPath.length == 0) continue;
+        if (lease.containerClass == DSMCMClassAppData &&
+            [lease.identifier isEqualToString:ownIdentifier]) {
+            continue;   // 自己的容器：不作为判据
+        }
+        NSString *probe = [lease.rootPath stringByAppendingPathComponent:@".myfilza_mha_lease_probe"];
+        const char *p = probe.fileSystemRepresentation;
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            close(fd);
+            unlink(p);
+            return YES;
+        }
+    }
+    return NO;
+}
+
 #pragma mark - 激活
 
 /// 为一个标识取租约并激活；成功则**持有**（存进 gMHALeases）
@@ -102,6 +131,7 @@ static BOOL mha_activate_identifier(NSString *identifier, uint64_t cls, NSString
     if (gMHALeases == nil) gMHALeases = [NSMutableArray array];
     [gMHALeases addObject:lease];        // 持有 → 扩展保持有效
     gMHAActivatedCount = gMHALeases.count;
+    if (cls == DSMCMClassAppData) gMHAAppDataCount++;
     return YES;
 }
 
@@ -118,6 +148,23 @@ int DSMHAKernelActivate(NSString **detail)
                        DSSignatureDiagnosticReport()];
         }
         return 1020;
+    }
+
+    // 签名 identifier 门槛（必须做）：
+    //   MCM 的授权键是**签名里的 CodeDirectory identifier**（上游 MobileHouseArrest-PoC 原文）。
+    //   它如果不是 MHA，MCM 只会给"自己的容器"、特权 profile 也不会下发 ——
+    //   此时尝试毫无意义，直接如实失败（避免像 0.7.3 那样"持有租约就自报成功"）。
+    //   读不到签名信息（-1）时不拦，交给下面的**严格探针**判定，绝不猜。
+    NSInteger sigMatch = DSSignatureIdentifierMatchesMHA();
+    if (sigMatch == 0) {
+        mha_stage(@"签名 identifier 不是 MHA");
+        if (detail) {
+            *detail = [NSString stringWithFormat:
+                       @"签名 identifier 不是 %@（MCM 只认签名里的 CodeDirectory identifier，"
+                        "所以拿不到别的 App 容器、特权 profile 也不会下发）。\n%@",
+                       DSMHABundleIdentifier, DSSignatureDiagnosticReport()];
+        }
+        return 1024;
     }
 
     if (!DSMCMBridgeAvailable()) {
@@ -201,8 +248,17 @@ int DSMHAKernelActivate(NSString **detail)
     BOOL writeOK = mha_probe_write(&writeWhere);
     [report appendFormat:@"写探针：%@ → %@\n", writeWhere ?: @"(未知)", writeOK ? @"成功" : @"失败"];
 
-    if (!writeOK && !readOK) {
-        mha_stage(@"探针全部失败");
+    // 成功判据（收紧，绝不"自报成功"）：
+    //   · 写沙盒外探针成功（= 特权 profile 真的下发了），**或**
+    //   · 成功激活了 **多于 1 个** App 数据容器（= 真的能看到别人的容器）。
+    //   只持有租约、只读到自己那一个容器，都**不算**成功。
+    BOOL sawOtherAppContainers = (okData > 1);
+    [report appendFormat:@"判定：写沙盒外探针=%@；成功激活的 App 数据容器=%lu 个（>1 才算看到别人的容器）\n",
+        writeOK ? @"通过" : @"未通过", (unsigned long)okData];
+    (void)readOK;
+
+    if (!writeOK && !sawOtherAppContainers) {
+        mha_stage(@"权限不足（没拿到别人的容器）");
         // 经验判据：只拿到自己一个数据容器 + 沙盒外写失败 ⇒ 身份没生效（签名 identifier 不是 MHA）。
         // 依据：上游 MobileHouseArrest-PoC 原文 —— MCM 把调用方的 CodeDirectory identifier 当授权键。
         if (okData <= 1) {
@@ -217,7 +273,7 @@ int DSMHAKernelActivate(NSString **detail)
     }
 
     mha_stage(@"完成");
-    [report appendString:@"MHA 路径完成：容器租约已激活并持有，普通文件 API 可直接读写这些容器。\n"];
+    [report appendString:@"MHA 路径完成：沙盒扩展已生效，可直接读写这些容器。\n"];
     [report appendString:DSSignatureSummaryLine()];
     if (detail) *detail = report;
     return 0;

@@ -70,6 +70,33 @@ FOUNDATION_EXPORT int DS3105KernelActivateUserspaceOnly(NSString *_Nullable *_Nu
 /// 用于「替换目标在 /var/mobile 之外」时补权限，不需要重跑任何内核代码。
 FOUNDATION_EXPORT BOOL DS3105KernelEnsureAccessForPath(NSString *path);
 
+#pragma mark - 访问路径选择（自动 / 仅 MHA / 仅内核）
+
+/// 「访问路径」的 UserDefaults 键，字符串值与 Swift 侧 @AppStorage 共用（改一处要同步改另一处）
+FOUNDATION_EXPORT NSString * const DSKernelPathModeDefaultsKey;    // myfilza.pathMode
+FOUNDATION_EXPORT NSString * const DSKernelPathModeValueAuto;      // auto
+FOUNDATION_EXPORT NSString * const DSKernelPathModeValueMHA;       // mha
+FOUNDATION_EXPORT NSString * const DSKernelPathModeValueKernel;    // kernel
+
+/// 用户选择的访问路径。
+///   Auto       —— 默认。MHA 可用（签名 identifier 就是 MHA 且探针通过）才用 MHA；否则自动回退内核。
+///   MHAOnly    —— 只走 MHA（零内核）。不可用时**明确失败**并说明原因，**绝不静默回退内核**。
+///   KernelOnly —— 完全跳过 MHA（连尝试都不做），直接走所选内核后端（默认 FilzaJailedDS，行为与 0.6.2 一致）。
+typedef NS_ENUM(NSInteger, DSKernelPathMode) {
+    DSKernelPathModeAuto       = 0,
+    DSKernelPathModeMHAOnly    = 1,
+    DSKernelPathModeKernelOnly = 2,
+};
+
+/// 读取用户当前选择（默认 Auto；值非法时也按 Auto 处理）
+FOUNDATION_EXPORT DSKernelPathMode DSKernelPathModeCurrent(void);
+
+/// 供日志 / 界面展示的名字
+FOUNDATION_EXPORT NSString *DSKernelPathModeDisplayName(DSKernelPathMode mode);
+
+/// 本次进程实际走通的是哪条路（未激活时返回 nil）
+FOUNDATION_EXPORT NSString * _Nullable DSKernelActivePathDescription(void);
+
 #pragma mark - 安全模式（稳定性优先）
 
 /// 「安全模式」的 UserDefaults 键。默认 **NO**（保持 FilzaJailedDS 既有行为不变）。

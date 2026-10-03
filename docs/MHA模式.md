@@ -139,3 +139,39 @@ PoC 原文第一句：**“MobileContainerManager trusted the caller's CodeDirec
 **真机实测（0.7.2，iPhone13,4 / iOS 18.5）**：`枚举 class 2 = 1 个标识`（只有自己）＋ `激活租约 6/6 成功` ＋ `写探针失败 (errno=1)` —— 与「签名 identifier 不是 MHA」完全吻合：**租约机制本身是通的**（能拿到自己的容器），但 MCM 不肯把别人的容器给你、特权 profile 也没下发。
 
 诊断本身是**只读**的：只用 `csops(2)` 与 Security.framework 里签名稳定的两个函数（`SecTaskCreateFromSelf` / `SecTaskCopyValueForEntitlement`，用 `dlsym` 取），全程 `@try/@catch`、`CFRelease` 配对；读不到就打印「(读取不到)」，**绝不影响激活流程、也不会因此崩溃**。
+
+---
+
+## 10. 两条路共存 与 自动择路（0.7.4）
+
+同一个 App 里现在有**两条完全独立**的容器访问路径，由用户在设置页自己切换：
+
+| 路径 | 需要什么 | 是否跑内核 |
+| --- | --- | --- |
+| **MHA · 零内核** | 签名 identifier 就是 `com.apple.mobile.MobileHouseArrest`（`Info.plist` 的 Bundle ID **和** 签名时的 CodeDirectory identifier 都要是它） | **完全不跑** |
+| **内核 + cred 逃逸** | 无特殊签名要求（默认 FilzaJailedDS；3105 后端需在下面单独选） | 跑（`kexploit_opa334` + cred 路线逃逸） |
+
+### 设置页三选一（用户自己切换，手动优先）
+
+| 选项 | 行为 |
+| --- | --- |
+| **自动（推荐）**（默认） | 先试 MHA：只有「签名 identifier 就是 MHA」**且**真实探针通过（能写沙盒外，或能读到**别人**的容器）才采用；否则**自动回退**到你选的内核后端 |
+| **仅 MHA（零内核）** | **只**走 MHA。不可用时**明确失败**并写出原因（例如「签名 identifier = `app.xxx.yyy`，不是 `com.apple.mobile.MobileHouseArrest`」），**绝不静默回退内核** |
+| **仅内核（FilzaJailedDS）** | **完全跳过 MHA**（连检测都不做），直接走内核后端，行为与 0.6.2 逐字一致 |
+
+选择持久化在 `UserDefaults`（键 `myfilza.pathMode`，值 `auto` / `mha` / `kernel`），重启后仍生效；每次激活都会把「当前选择」与「实际走的路径」写进日志。
+
+### 成功判据（0.7.4 收紧，修掉 0.7.3 的错报）
+
+以前把「持有租约数 > 0」当成成功 —— 真机上明明只拿到自己一个容器、写探针 `EPERM`，却打了 `沙盒逃逸成功` ✗。现在**只看真实结果**：
+
+- ✅ **写沙盒外探针成功**（特权 profile 真的下发），**或**
+- ✅ 成功激活的 **App 数据容器（class 2）多于 1 个**（= 真的能看到别人的容器）。
+- ❌ 只持有租约、只读到自己那一个容器 —— **不算成功**。
+
+另外 MHA 路径加了**签名门槛**：签名 identifier 明确不是 MHA 时，**连 MCM 都不尝试**（因为授权键不匹配，试了也只会拿到自己的容器），直接如实失败并给修复指引。
+
+### 结果展示
+
+激活结束时日志会写一行 `✅ 本次实际路径 = MHA · 零内核` 或 `✅ 本次实际路径 = 内核 + cred 逃逸（FilzaJailedDS）`；设置页顶部也会显示「当前生效路径」，未激活时显示「尚未激活」。失败时则会写 `❌ 激活未成功（结果码 …）；访问路径选择 = …`，并附上 MHA 的失败原因。
+

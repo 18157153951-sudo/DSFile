@@ -87,6 +87,31 @@ BOOL DSSafeModeEnabled(void)
     return [d boolForKey:DSSafeModeDefaultsKey];
 }
 
+#pragma mark - 访问路径选择（自动 / 仅 MHA / 仅内核）
+
+NSString * const DSKernelPathModeDefaultsKey = @"myfilza.pathMode";
+NSString * const DSKernelPathModeValueAuto   = @"auto";
+NSString * const DSKernelPathModeValueMHA    = @"mha";
+NSString * const DSKernelPathModeValueKernel = @"kernel";
+
+DSKernelPathMode DSKernelPathModeCurrent(void)
+{
+    NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:DSKernelPathModeDefaultsKey];
+    if ([v isEqualToString:DSKernelPathModeValueMHA])    return DSKernelPathModeMHAOnly;
+    if ([v isEqualToString:DSKernelPathModeValueKernel]) return DSKernelPathModeKernelOnly;
+    return DSKernelPathModeAuto;   // 没设置过 / 值非法 = 自动
+}
+
+NSString *DSKernelPathModeDisplayName(DSKernelPathMode mode)
+{
+    switch (mode) {
+        case DSKernelPathModeMHAOnly:    return @"仅 MHA（零内核）";
+        case DSKernelPathModeKernelOnly: return @"仅内核（FilzaJailedDS）";
+        case DSKernelPathModeAuto:
+        default:                         return @"自动（推荐）";
+    }
+}
+
 #pragma mark - 纯用户态令牌路径（bad_query + sandbox_extension_consume，完全不碰内核）
 
 /// 已取过令牌的路径与句柄（进程内保持有效，不主动 release；上限 16 条）
