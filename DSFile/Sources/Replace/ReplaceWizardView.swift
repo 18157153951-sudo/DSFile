@@ -97,17 +97,19 @@ final class ReplaceWizardModel: ObservableObject {
     @Published var lastBackupEnabled = true
     /// 需要用户去设置页激活时置真，视图据此弹提示
     @Published var needsActivation = false
-    /// 上一次运行是不是文件夹模式（结果卡片据此显示文件夹图标）
+    /// 上一次运行是不是「整目录」模式（文件夹 / 包体；结果卡片据此显示目录图标）
     @Published var lastRunWasFolders = false
-    /// 已保存的自动任务摘要（nil = 还没保存过）
-    @Published var savedAutoTaskSummary: String?
+    /// 用户显式保存的自动化任务（只在点「运行」时执行，App 不会自动跑）
+    @Published var savedTasks: [ReplaceSavedTask] = []
+    /// 当前绑定有没有改动还没保存成任务
+    @Published var hasUnsavedChanges = false
 
-    /// 文件模式 / 文件夹模式（持久化；两套绑定互不干扰）
+    /// 三种模式（持久化；三套绑定互不干扰）
     @Published var mode: ReplaceMode {
         didSet {
             UserDefaults.standard.set(mode.rawValue, forKey: Self.modeKey)
-            if mode == .folders {
-                // 文件夹模式强制开备份：镜像替换会把目标里源没有的旧文件删掉，没有备份就没有兜底
+            // 文件夹 / 包体模式强制开备份：它们会整目录动文件，没有备份就没有兜底
+            if mode == .folders || mode == .bundle {
                 autoBackup = true
             }
         }
@@ -118,24 +120,19 @@ final class ReplaceWizardModel: ObservableObject {
         didSet { UserDefaults.standard.set(autoBackup, forKey: Self.autoBackupKey) }
     }
 
-    /// 「启动时自动执行」
-    @Published var autoRunOnLaunch: Bool {
-        didSet {
-            ReplaceAutoRunner.runOnLaunch = autoRunOnLaunch
-            if autoRunOnLaunch { noteAutoTaskState() }
-        }
+    /// 包体(.app)模式的语义（镜像 / 合并），持久化
+    @Published var bundleSemantics: ReplaceBundleSemantics {
+        didSet { UserDefaults.standard.set(bundleSemantics.rawValue, forKey: Self.bundleSemanticsKey) }
     }
 
-    /// 「激活成功后自动执行」
-    @Published var autoRunAfterActivation: Bool {
-        didSet {
-            ReplaceAutoRunner.runAfterActivation = autoRunAfterActivation
-            if autoRunAfterActivation { noteAutoTaskState() }
-        }
-    }
+    /// 包体模式的源文件（按文件名匹配进 .app）
+    @Published var bundleFiles: [WizardFile] = []
+    /// 包体模式的源文件夹（最多一个：换 / 并入整个 .app）
+    @Published var bundleFolder: WizardFolder?
 
     static let autoBackupKey = "myfilza.replaceAutoBackup"
     static let modeKey = "myfilza.replaceMode"
+    static let bundleSemanticsKey = "myfilza.replaceBundleSemantics"
     /// 本页产生的运行记录统一用这个名字，「最近的替换」按它过滤
     static let runScriptName = ReplaceMode.runPrefix
 
@@ -151,9 +148,13 @@ final class ReplaceWizardModel: ObservableObject {
         } else {
             mode = .files
         }
-        autoRunOnLaunch = ReplaceAutoRunner.runOnLaunch
-        autoRunAfterActivation = ReplaceAutoRunner.runAfterActivation
-        savedAutoTaskSummary = ReplaceAutoStore.load()?.summary
+        if let raw = UserDefaults.standard.string(forKey: Self.bundleSemanticsKey),
+           let stored = ReplaceBundleSemantics(rawValue: raw) {
+            bundleSemantics = stored
+        } else {
+            bundleSemantics = .mirror
+        }
+        savedTasks = ReplaceTaskStore.load()
     }
 
     let inboxDirectory: String = {
@@ -193,7 +194,7 @@ final class ReplaceWizardModel: ObservableObject {
             append("目标：\(app.name)（\(app.bundleId)）", .info)
         }
         rematchAll()
-        saveAutoTask()
+        markDirty()
     }
 
     /// 应用管理器「设为替换页目标 App」：按 bundle id 选中（列表还没加载完就先拉一次）
@@ -220,7 +221,7 @@ final class ReplaceWizardModel: ObservableObject {
         selectedApp = app
         append("目标：\(app.name)（\(app.bundleId)）", .info)
         rematchAll()
-        saveAutoTask()
+        markDirty()
     }
 
     /// 「更换」按钮：清掉目标（列表重新展开）
@@ -228,7 +229,7 @@ final class ReplaceWizardModel: ObservableObject {
         selectedApp = nil
         append("已取消目标选择", .info)
         rematchAll()
-        saveAutoTask()
+        markDirty()
     }
 
     // MARK: - 本地文件
@@ -275,7 +276,7 @@ final class ReplaceWizardModel: ObservableObject {
             self.append(added > 0 ? "已导入 \(added) 个文件" : "没有导入任何文件", added > 0 ? .success : .warning)
             self.reloadInbox()
             self.rematchAll()
-            self.saveAutoTask()
+            self.markDirty()
         }, cancel: nil)
     }
 
@@ -284,12 +285,12 @@ final class ReplaceWizardModel: ObservableObject {
             let removed = files.remove(at: index)
             append("已从列表移除 \(removed.name)（文件本体保留在 ReplaceInbox）", .info)
         }
-        saveAutoTask()
+        markDirty()
     }
 
     func removeFile(id: UUID) {
         files.removeAll { $0.id == id }
-        saveAutoTask()
+        markDirty()
     }
 
     private func uniqueInboxPath(for name: String) -> String {
@@ -390,12 +391,205 @@ final class ReplaceWizardModel: ObservableObject {
             files[index].state = manual ? .manual : .unique
         }
         append(trimmed.isEmpty ? "已清除 \(files[index].name) 的目标路径" : "\(files[index].name) → \(trimmed)", .info)
-        saveAutoTask()
+        markDirty()
     }
 
     /// 清除某一条的绑定（长按菜单用）
     func clearTarget(for id: UUID) {
         setTarget(path: "", for: id, manual: false)
+    }
+
+    // MARK: - 包体(.app)模式
+
+    /// 包体模式的源文件列表（与文件模式共用 ReplaceInbox，避免多一份拷贝）
+    func reloadBundleFiles() {
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: inboxDirectory, withIntermediateDirectories: true)
+
+        let previous = Dictionary(uniqueKeysWithValues: bundleFiles.map { ($0.localPath, $0) })
+        let names = (try? fm.contentsOfDirectory(atPath: inboxDirectory))?.sorted() ?? []
+
+        var rebuilt: [WizardFile] = []
+        for name in names where !name.hasPrefix(".") {
+            let full = (inboxDirectory as NSString).appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: full, isDirectory: &isDir), !isDir.boolValue else { continue }
+            if let existing = previous[full] {
+                rebuilt.append(existing)
+            } else {
+                let size = ((try? fm.attributesOfItem(atPath: full))?[.size] as? NSNumber)?.int64Value ?? 0
+                rebuilt.append(WizardFile(localPath: full, name: name, sizeText: Self.sizeText(size)))
+            }
+        }
+        bundleFiles = rebuilt
+    }
+
+    func importBundleFiles() {
+        DSPickers.presentOpenPicker(utis: nil, multiple: true, asCopy: true, completion: { urls in
+            guard !urls.isEmpty else { return }
+            let fm = FileManager.default
+            try? fm.createDirectory(atPath: self.inboxDirectory, withIntermediateDirectories: true)
+
+            var added = 0
+            for url in urls {
+                let destination = self.uniqueInboxPath(for: url.lastPathComponent)
+                do {
+                    if fm.fileExists(atPath: destination) { try fm.removeItem(atPath: destination) }
+                    try fm.copyItem(at: url, to: URL(fileURLWithPath: destination))
+                    added += 1
+                } catch {
+                    self.append("导入失败 \(url.lastPathComponent)：\(error.localizedDescription)", .error)
+                }
+            }
+            self.append(added > 0 ? "已导入 \(added) 个文件（包体模式）" : "没有导入任何文件",
+                        added > 0 ? .success : .warning)
+            self.reloadBundleFiles()
+            self.rematchBundle()
+            self.markDirty()
+        }, cancel: nil)
+    }
+
+    /// 在目标 App 的 .app 包里递归找同名文件（唯一命中自动绑定）
+    func rematchBundle() {
+        reloadBundleFiles()
+        guard !bundleFiles.isEmpty else { return }
+
+        let token = UUID()
+        matchToken = token
+
+        guard let app = selectedApp, !app.bundlePath.isEmpty else {
+            for index in bundleFiles.indices {
+                bundleFiles[index].targetPath = nil
+                bundleFiles[index].candidates = []
+                bundleFiles[index].state = .notFound
+            }
+            append("还没选目标 App，先选目标再匹配", .info)
+            return
+        }
+
+        let bundlePath = app.bundlePath
+        let wanted = Set(bundleFiles.map { $0.name })
+        append("正在 \(app.name) 的包体(.app)里递归查找同名文件…", .info)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var index: [String: [String]] = [:]
+            var visited = 0
+            let fm = FileManager.default
+            if let enumerator = fm.enumerator(atPath: bundlePath) {
+                while let relative = enumerator.nextObject() as? String {
+                    visited += 1
+                    if visited > 200_000 { break }
+                    let name = (relative as NSString).lastPathComponent
+                    guard wanted.contains(name) else { continue }
+                    if index[name]?.count ?? 0 >= 12 { continue }
+                    let full = (bundlePath as NSString).appendingPathComponent(relative)
+                    var isDir: ObjCBool = false
+                    if fm.fileExists(atPath: full, isDirectory: &isDir), !isDir.boolValue {
+                        index[name, default: []].append(full)
+                    }
+                }
+            }
+
+            DispatchQueue.main.async {
+                guard self.matchToken == token else { return }
+                var unique = 0, ambiguous = 0, missing = 0
+                for position in self.bundleFiles.indices {
+                    if self.bundleFiles[position].state == .manual,
+                       let path = self.bundleFiles[position].targetPath, !path.isEmpty {
+                        continue
+                    }
+                    let name = self.bundleFiles[position].name
+                    let hits = index[name] ?? []
+                    self.bundleFiles[position].candidates = hits
+                    switch hits.count {
+                    case 0:
+                        self.bundleFiles[position].targetPath = nil
+                        self.bundleFiles[position].state = .notFound
+                        missing += 1
+                    case 1:
+                        self.bundleFiles[position].targetPath = hits[0]
+                        self.bundleFiles[position].state = .unique
+                        unique += 1
+                    default:
+                        self.bundleFiles[position].targetPath = nil
+                        self.bundleFiles[position].state = .ambiguous
+                        ambiguous += 1
+                    }
+                }
+                self.append("包体匹配完成：自动绑定 \(unique) 个，多处同名 \(ambiguous) 个，没找到 \(missing) 个（扫描 \(visited) 项）",
+                            ambiguous > 0 || missing > 0 ? .warning : .success)
+            }
+        }
+    }
+
+    func setBundleTarget(path: String, for id: UUID, manual: Bool) {
+        guard let index = bundleFiles.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        bundleFiles[index].targetPath = trimmed.isEmpty ? nil : trimmed
+        if trimmed.isEmpty {
+            bundleFiles[index].state = bundleFiles[index].candidates.count > 1 ? .ambiguous : .notFound
+        } else {
+            bundleFiles[index].state = manual ? .manual : .unique
+        }
+        append(trimmed.isEmpty ? "已清除 \(bundleFiles[index].name) 的目标路径" : "\(bundleFiles[index].name) → \(trimmed)", .info)
+        markDirty()
+    }
+
+    func clearBundleTarget(for id: UUID) {
+        setBundleTarget(path: "", for: id, manual: false)
+    }
+
+    func removeBundleFile(id: UUID) {
+        bundleFiles.removeAll { $0.id == id }
+        markDirty()
+    }
+
+    /// 包体模式：导入一个源文件夹（整包换 / 并入）
+    func importBundleFolder() {
+        DSPickers.presentFolderPickerAsCopy(completion: { urls in
+            guard let url = urls.first else { return }
+            let fm = FileManager.default
+            try? fm.createDirectory(atPath: self.folderSourceDirectory, withIntermediateDirectories: true)
+            let destination = self.uniqueFolderSourcePath(for: url.lastPathComponent)
+            do {
+                try FileOperations.copyDirectoryContents(from: url, to: URL(fileURLWithPath: destination))
+                self.append("已导入源文件夹 \(url.lastPathComponent)", .success)
+            } catch {
+                self.append("导入文件夹失败 \(url.lastPathComponent)：\(error.localizedDescription)", .error)
+            }
+            self.reloadBundleFolder(preferred: destination)
+            self.markDirty()
+        }, cancel: nil)
+    }
+
+    /// 重新统计包体模式的源文件夹（保留已绑定的目标；新导入时默认目标就是目标 App 的 .app）
+    func reloadBundleFolder(preferred: String? = nil) {
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: folderSourceDirectory, withIntermediateDirectories: true)
+        guard let path = preferred ?? bundleFolder?.localPath, fm.fileExists(atPath: path) else {
+            bundleFolder = nil
+            return
+        }
+        var folder = WizardFolder(localPath: path, name: (path as NSString).lastPathComponent)
+        folder.targetPath = bundleFolder?.targetPath ?? selectedApp?.bundlePath
+        let stats = Self.folderStats(path)
+        folder.itemCount = stats.count
+        folder.sizeText = Self.sizeText(stats.size)
+        bundleFolder = folder
+    }
+
+    func setBundleFolderTarget(path: String) {
+        guard var folder = bundleFolder else { return }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        folder.targetPath = trimmed.isEmpty ? nil : trimmed
+        bundleFolder = folder
+        append(trimmed.isEmpty ? "已清除源文件夹的目标路径" : "源文件夹 → \(trimmed)", .info)
+        markDirty()
+    }
+
+    func removeBundleFolder() {
+        bundleFolder = nil
+        markDirty()
     }
 
     // MARK: - 文件夹模式：源文件夹
@@ -450,13 +644,13 @@ final class ReplaceWizardModel: ObservableObject {
                 self.append("导入文件夹失败 \(url.lastPathComponent)：\(error.localizedDescription)", .error)
             }
             self.reloadFolders()
-            self.saveAutoTask()
+            self.markDirty()
         }, cancel: nil)
     }
 
     func removeFolder(id: UUID) {
         folders.removeAll { $0.id == id }
-        saveAutoTask()
+        markDirty()
     }
 
     /// 绑定（或清除）某个源文件夹的目标文件夹
@@ -467,7 +661,7 @@ final class ReplaceWizardModel: ObservableObject {
         append(trimmed.isEmpty
                ? "已清除 \(folders[index].name) 的目标文件夹"
                : "\(folders[index].name) → \(trimmed)", .info)
-        saveAutoTask()
+        markDirty()
     }
 
     func clearFolderTarget(for id: UUID) {
@@ -507,63 +701,179 @@ final class ReplaceWizardModel: ObservableObject {
 
     var boundCount: Int { files.filter { ($0.targetPath ?? "").isEmpty == false }.count }
     var boundFolderCount: Int { folders.filter { ($0.targetPath ?? "").isEmpty == false }.count }
+    var boundBundleFileCount: Int { bundleFiles.filter { ($0.targetPath ?? "").isEmpty == false }.count }
+    var boundBundleFolderCount: Int { (bundleFolder?.targetPath ?? "").isEmpty ? 0 : 1 }
     /// 当前模式下已绑定的条目数
-    var currentBoundCount: Int { mode == .files ? boundCount : boundFolderCount }
+    var currentBoundCount: Int {
+        switch mode {
+        case .files: return boundCount
+        case .folders: return boundFolderCount
+        case .bundle: return boundBundleFileCount + boundBundleFolderCount
+        }
+    }
     /// 当前模式下的条目总数
-    var currentItemCount: Int { mode == .files ? files.count : folders.count }
+    var currentItemCount: Int {
+        switch mode {
+        case .files: return files.count
+        case .folders: return folders.count
+        case .bundle: return bundleFiles.count + (bundleFolder == nil ? 0 : 1)
+        }
+    }
     var readyToRun: Bool { selectedApp != nil && currentBoundCount > 0 && !isRunning }
 
-    /// 把当前界面上的绑定收成一份任务（自动执行与手动执行共用同一份数据）
+    /// 把当前界面上的绑定收成一份配置（保存任务 / 立即执行共用同一份数据）
     func currentTask(forceBackup: Bool = false) -> ReplaceAutoTask {
         let app = selectedApp
+        let sourceFiles: [WizardFile]
+        let sourceFolders: [WizardFolder]
+        switch mode {
+        case .files:
+            sourceFiles = files
+            sourceFolders = []
+        case .folders:
+            sourceFiles = []
+            sourceFolders = folders
+        case .bundle:
+            sourceFiles = bundleFiles
+            sourceFolders = bundleFolder.map { [$0] } ?? []
+        }
+
         return ReplaceAutoTask(bundleId: app?.bundleId ?? "",
                                appName: app?.name ?? "",
                                bundlePath: app?.bundlePath ?? "",
                                dataPath: app?.dataPath ?? "",
                                executableName: app?.executableName ?? "",
                                mode: mode,
-                               files: files.compactMap { file in
+                               files: sourceFiles.compactMap { file in
                                    guard let target = file.targetPath, !target.isEmpty else { return nil }
                                    return ReplaceFileBinding(localPath: file.localPath,
                                                              name: file.name,
                                                              targetPath: target)
                                },
-                               folders: folders.compactMap { folder in
+                               folders: sourceFolders.compactMap { folder in
                                    guard let target = folder.targetPath, !target.isEmpty else { return nil }
                                    return ReplaceFolderBinding(localPath: folder.localPath,
                                                                name: folder.name,
                                                                targetPath: target)
                                },
+                               semantics: mode == .bundle ? bundleSemantics : nil,
                                backup: forceBackup ? true : autoBackup,
                                updatedAt: Date())
     }
 
-    /// 每次用户改动绑定就同步保存成自动任务（`quiet` 时只存不记日志）
-    func saveAutoTask(quiet: Bool = false) {
-        let task = currentTask(forceBackup: mode == .folders)
-        guard !task.bundleId.isEmpty, !task.isEmpty else {
-            // 目标没选或还没有绑定：保留旧任务，不动它（避免用户只是清空界面就把自动任务删了）
-            savedAutoTaskSummary = ReplaceAutoStore.load()?.summary
-            return
-        }
-        let ok = ReplaceAutoStore.save(task)
-        savedAutoTaskSummary = ReplaceAutoStore.load()?.summary
-        if ok && !quiet {
-            append("已保存为自动任务：\(task.summary)", .info)
-        }
+    // MARK: - 自动化任务（用户显式保存 + 手动运行）
+
+    /// 绑定有改动：标记「未保存」，不再自动写盘
+    func markDirty() {
+        hasUnsavedChanges = true
     }
 
-    private func noteAutoTaskState() {
-        if let task = ReplaceAutoStore.load(), !task.isEmpty {
-            append("自动执行已开启（\(task.summary)）；每次都会先备份、并写运行记录，可一键回滚。", .info)
+    func reloadSavedTasks() {
+        savedTasks = ReplaceTaskStore.load()
+        hasUnsavedChanges = false
+    }
+
+    /// 建议的任务名（App 名 · 模式 · 时间）
+    func suggestedTaskName() -> String {
+        ReplaceSavedTask.defaultName(for: currentTask(forceBackup: mode != .files))
+    }
+
+    /// 把当前设置保存成一条命名任务
+    @discardableResult
+    func saveCurrentAsTask(name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let task = currentTask(forceBackup: mode != .files)
+        guard !task.bundleId.isEmpty else {
+            append("保存失败：还没有选择目标 App", .error)
+            return false
+        }
+        guard !task.isEmpty else {
+            append("保存失败：还没有绑定任何替换内容（先把目标路径选好）", .error)
+            return false
+        }
+        let finalName = trimmed.isEmpty ? ReplaceSavedTask.defaultName(for: task) : trimmed
+        let saved = ReplaceSavedTask(id: UUID().uuidString, name: finalName, createdAt: Date(), task: task)
+        var list = savedTasks
+        list.insert(saved, at: 0)
+        guard ReplaceTaskStore.save(list) else {
+            append("保存失败：写 \(ReplaceTaskStore.filePath) 出错", .error)
+            return false
+        }
+        savedTasks = list
+        hasUnsavedChanges = false
+        append("已保存任务「\(finalName)」：\(saved.summary)。要执行时点它的「运行」。", .success)
+        return true
+    }
+
+    func renameTask(_ saved: ReplaceSavedTask, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var list = savedTasks
+        guard let index = list.firstIndex(where: { $0.id == saved.id }) else { return }
+        list[index].name = trimmed
+        if ReplaceTaskStore.save(list) {
+            savedTasks = list
+            append("任务已改名为「\(trimmed)」", .info)
         } else {
-            append("自动执行已开启，但还没有保存的自动任务：先在下面选好目标与替换内容。", .warning)
+            append("改名失败：写盘出错", .error)
         }
     }
 
-    /// 「现在运行一次」：走自动执行那条路（强制备份 + 并发闸门）
-    func runAutoTaskNow() {
-        ReplaceAutoRunner.runNow()
+    func deleteTask(_ saved: ReplaceSavedTask) {
+        let list = savedTasks.filter { $0.id != saved.id }
+        if ReplaceTaskStore.save(list) {
+            savedTasks = list
+            append("已删除任务「\(saved.name)」", .info)
+        } else {
+            append("删除失败：写盘出错", .error)
+        }
+    }
+
+    /// 用一条绑定生成向导里的文件行（sizeText 现算）
+    private func makeWizardFile(localPath: String, name: String, targetPath: String?) -> WizardFile {
+        WizardFile(localPath: localPath,
+                   name: name,
+                   sizeText: Self.sizeText(FileOperations.fileSize(localPath)),
+                   targetPath: targetPath,
+                   candidates: [],
+                   state: .manual)
+    }
+
+    /// 把任务载入编辑区（按模式恢复到对应绑定）
+    func loadTaskIntoEditor(_ saved: ReplaceSavedTask) {
+        let task = saved.task
+        mode = task.mode
+        if let app = apps.first(where: { $0.bundleId == task.bundleId }) {
+            applySelection(app)
+        }
+        switch task.mode {
+        case .files:
+            files = task.files.map { makeWizardFile(localPath: $0.localPath, name: $0.name, targetPath: $0.targetPath) }
+        case .folders:
+            folders = task.folders.map { binding in
+                var folder = WizardFolder(localPath: binding.localPath, name: binding.name)
+                folder.targetPath = binding.targetPath
+                return folder
+            }
+        case .bundle:
+            bundleFiles = task.files.map { makeWizardFile(localPath: $0.localPath, name: $0.name, targetPath: $0.targetPath) }
+            if let first = task.folders.first {
+                var folder = WizardFolder(localPath: first.localPath, name: first.name)
+                folder.targetPath = first.targetPath
+                bundleFolder = folder
+            } else {
+                bundleFolder = nil
+            }
+            bundleSemantics = task.effectiveSemantics
+        }
+        autoBackup = task.backup
+        hasUnsavedChanges = false
+        append("已载入任务「\(saved.name)」：\(task.summary)", .info)
+    }
+
+    /// 运行一条已保存的任务（强制备份 + 环境门 + 并发门）
+    func runSavedTask(_ saved: ReplaceSavedTask) {
+        ReplaceTaskRunner.run(saved)
     }
 
     func startReplace() {
@@ -577,15 +887,20 @@ final class ReplaceWizardModel: ObservableObject {
             return
         }
 
-        let task = currentTask(forceBackup: mode == .folders)
+        let task = currentTask(forceBackup: mode != .files)
         guard !task.isEmpty else {
-            append(mode == .files
-                   ? "还没有可替换的条目：每个文件都要先绑定一个目标路径"
-                   : "还没有可替换的文件夹：每个源文件夹都要先绑定一个目标文件夹", .error)
+            switch mode {
+            case .files:
+                append("还没有可替换的条目：每个文件都要先绑定一个目标路径", .error)
+            case .folders:
+                append("还没有可替换的文件夹：每个源文件夹都要先绑定一个目标文件夹", .error)
+            case .bundle:
+                append("还没有可替换的内容：加一个源文件夹（整包换 / 并入），或加文件让它在 .app 里按文件名匹配", .error)
+            }
             return
         }
         guard ReplaceRunGate.acquire() else {
-            append("已经有一次替换在执行中（可能是自动执行），这次先不重复跑。", .warning)
+            append("已经有一次替换在执行中，这次先不重复跑。", .warning)
             return
         }
 
@@ -594,11 +909,20 @@ final class ReplaceWizardModel: ObservableObject {
         lastBackupId = nil
         lastRunSucceeded = false
         lastBackupEnabled = task.backup
-        lastRunWasFolders = (mode == .folders)
+        lastRunWasFolders = (mode != .files)
 
-        append("=== 开始\(mode == .folders ? "文件夹" : "文件")替换：\(task.itemCount) 项 → \(app.name) ===", .info)
+        let modeText: String
+        switch mode {
+        case .files: modeText = "文件"
+        case .folders: modeText = "文件夹"
+        case .bundle: modeText = "包体(.app)"
+        }
+        append("=== 开始\(modeText)替换：\(task.itemCount) 项 → \(app.name) ===", .info)
         if mode == .folders {
             append("镜像语义：目标文件夹会被源文件夹整体替换（目标里源没有的旧文件会被移除）；替换前已强制整棵递归备份。", .warning)
+        } else if mode == .bundle {
+            append("包体语义：\(bundleSemantics.title)——\(bundleSemantics.subtitle)；替换前整棵递归备份。", .warning)
+            append("⚠️ 改自签 App 的包体会破坏它的签名校验，可能导致 App 直接打不开；动手前确认你有重装手段。", .warning)
         }
         if !task.backup {
             append("⚠️ 本次关闭了「执行前自动备份」：覆盖后无法回滚，请自行确认。", .warning)
@@ -759,25 +1083,38 @@ struct ReplaceWizardView: View {
     @State private var manualSheet: ReplaceWizardModel.WizardFile?
     @State private var browserRequest: BrowserRequest?
     @State private var folderBrowserRequest: FolderBrowserRequest?
+    @State private var bundleCandidateSheet: ReplaceWizardModel.WizardFile?
+    @State private var bundleManualSheet: ReplaceWizardModel.WizardFile?
+    @State private var bundleBrowserRequest: BrowserRequest?
+    @State private var bundleFolderBrowserRequest: FolderBrowserRequest?
     @State private var appFilter: String = ""
     @State private var activationAlert = false
     @State private var rollbackConfirm = false
     @State private var logSheetRun: RunRecord?
     @State private var pendingRollbackRun: RunRecord?
     @State private var loaded = false
+    // 自动化任务的命名 / 改名 / 删除
+    @State private var namingTask = false
+    @State private var newTaskName = ""
+    @State private var renameTarget: ReplaceSavedTask?
+    @State private var renameText = ""
+    @State private var deleteTarget: ReplaceSavedTask?
 
     var body: some View {
         NavigationView {
             Form {
                 modeSection
                 targetSection
-                if model.mode == .files {
+                switch model.mode {
+                case .files:
                     fileSection
-                } else {
+                case .folders:
                     folderSection
+                case .bundle:
+                    bundleSection
                 }
                 runSection
-                automationSection
+                savedTasksSection
                 resultSection
                 recentSection
                 logSection
@@ -793,7 +1130,11 @@ struct ReplaceWizardView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        model.importFiles()
+                        switch model.mode {
+                        case .files: model.importFiles()
+                        case .folders: model.importFolders()
+                        case .bundle: model.importBundleFiles()
+                        }
                     } label: {
                         Image(systemName: "plus")
                     }
@@ -829,6 +1170,68 @@ struct ReplaceWizardView: View {
                     model.setFolderTarget(path: path, for: request.folder.id)
                     folderBrowserRequest = nil
                 }
+            }
+            .sheet(item: $bundleCandidateSheet) { file in
+                CandidateTargetSheet(file: file) { path in
+                    model.setBundleTarget(path: path, for: file.id, manual: false)
+                    bundleCandidateSheet = nil
+                }
+            }
+            .sheet(item: $bundleManualSheet) { file in
+                ManualTargetSheet(initial: file.targetPath,
+                                  dataPath: model.selectedApp?.bundlePath,
+                                  name: file.name) { path in
+                    model.setBundleTarget(path: path, for: file.id, manual: true)
+                    bundleManualSheet = nil
+                }
+            }
+            .sheet(item: $bundleBrowserRequest) { request in
+                TargetFileBrowserSheet(app: request.app,
+                                       localFileName: request.file.name,
+                                       initialTarget: request.file.targetPath,
+                                       lockedRoot: request.app.bundlePath) { path in
+                    model.setBundleTarget(path: path, for: request.file.id, manual: true)
+                    bundleBrowserRequest = nil
+                }
+            }
+            .sheet(item: $bundleFolderBrowserRequest) { request in
+                TargetFileBrowserSheet(app: request.app,
+                                       localFileName: request.folder.name,
+                                       initialTarget: request.folder.targetPath,
+                                       pickFolders: true,
+                                       lockedRoot: request.app.bundlePath) { path in
+                    model.setBundleFolderTarget(path: path)
+                    bundleFolderBrowserRequest = nil
+                }
+            }
+            .alert("保存为自动化任务", isPresented: $namingTask) {
+                TextField("任务名", text: $newTaskName)
+                Button("保存") { model.saveCurrentAsTask(name: newTaskName) }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("只保存配置；要执行时到「自动化任务」列表里点它的「运行」。")
+            }
+            .alert("重命名任务",
+                   isPresented: Binding(get: { renameTarget != nil },
+                                        set: { if !$0 { renameTarget = nil } })) {
+                TextField("任务名", text: $renameText)
+                Button("保存") {
+                    if let target = renameTarget { model.renameTask(target, to: renameText) }
+                    renameTarget = nil
+                }
+                Button("取消", role: .cancel) { renameTarget = nil }
+            }
+            .confirmationDialog("删除这条任务？",
+                                isPresented: Binding(get: { deleteTarget != nil },
+                                                     set: { if !$0 { deleteTarget = nil } }),
+                                titleVisibility: .visible) {
+                Button("删除", role: .destructive) {
+                    if let target = deleteTarget { model.deleteTask(target) }
+                    deleteTarget = nil
+                }
+                Button("取消", role: .cancel) { deleteTarget = nil }
+            } message: {
+                Text("只删这条保存的配置，不会动已经改过的文件（回滚请用「记录」页或「最近的替换」）。")
             }
             .sheet(item: $logSheetRun) { run in
                 RunLogSheet(title: "\(ReplaceWizardModel.timeText(run.date)) · \(run.summary)",
@@ -870,15 +1273,18 @@ struct ReplaceWizardView: View {
                 loaded = true
                 model.reloadInbox()
                 model.reloadFolders()
+                model.reloadBundleFiles()
+                model.reloadBundleFolder()
+                model.reloadSavedTasks()
                 model.loadApps()
-                model.append("提示：每次替换前都会整份备份（文件夹模式是整棵递归备份），随时可以在下方或「记录」页一键回滚。", .info)
+                model.append("提示：每次替换前都会整份备份（文件夹 / 包体模式是整棵递归备份），随时可以在下方或「记录」页一键回滚。", .info)
             }
-            .onReceive(NotificationCenter.default.publisher(for: ReplaceAutoRunner.didRunNotification)) { note in
+            .onReceive(NotificationCenter.default.publisher(for: ReplaceTaskRunner.didRunNotification)) { note in
                 let success = (note.userInfo?["success"] as? Bool) ?? false
                 let summary = (note.userInfo?["summary"] as? String) ?? ""
                 RunStore.shared.reload()
-                model.savedAutoTaskSummary = ReplaceAutoStore.load()?.summary
-                model.append("自动执行：\(success ? "成功" : "未成功") · \(summary)",
+                model.reloadSavedTasks()
+                model.append("替换任务：\(success ? "成功" : "未成功") · \(summary)",
                              success ? .success : .warning)
             }
             .onChange(of: model.needsActivation) { needs in
@@ -904,9 +1310,14 @@ struct ReplaceWizardView: View {
         } header: {
             Text("替换方式")
         } footer: {
-            Text(model.mode == .files
-                 ? "文件模式：把本地文件按文件名替换进目标 App（自动匹配 / 浏览目录 / 手填三条路）。"
-                 : "文件夹模式：把本地文件夹整体**镜像替换**进目标文件夹——目标里源没有的旧文件会被移除，替换前强制整棵递归备份。")
+            switch model.mode {
+            case .files:
+                Text("文件模式：把本地文件按文件名替换进目标 App（自动匹配 / 浏览目录 / 手填三条路）。")
+            case .folders:
+                Text("文件夹模式：把本地文件夹整体**镜像替换**进目标文件夹——目标里源没有的旧文件会被移除，替换前强制整棵递归备份。")
+            case .bundle:
+                Text("包体(.app)模式：目标锁定为所选 App 的包体，可以放一个源文件夹（整包换 / 并入）或若干文件（按文件名匹配进 .app）。")
+            }
         }
     }
 
@@ -1158,62 +1569,206 @@ struct ReplaceWizardView: View {
         folderBrowserRequest = FolderBrowserRequest(folder: folder, app: app)
     }
 
-    // MARK: 自动化
+    // MARK: 包体(.app)模式
 
-    private var automationSection: some View {
+    private var bundleSection: some View {
         Section {
-            Toggle(isOn: $model.autoRunOnLaunch) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("启动时自动执行")
-                        .font(.subheadline)
-                    Text("打开 App 后自动跑一次已保存的任务")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            Toggle(isOn: $model.autoRunAfterActivation) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("激活成功后自动执行")
-                        .font(.subheadline)
-                    Text("点『激活内核访问』并逃逸成功后自动跑一次")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            Button {
-                model.saveAutoTask()
-                model.runAutoTaskNow()
-            } label: {
-                Label("现在运行一次", systemImage: "play.circle")
-            }
-
-            if let summary = model.savedAutoTaskSummary {
+            if let app = model.selectedApp {
                 HStack(spacing: 12) {
-                    Image(systemName: "tray.and.arrow.down.fill")
+                    Image(systemName: "app.fill")
                         .font(.title3)
                         .foregroundColor(.accentColor)
                         .frame(width: 28)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("已保存的自动任务")
+                        Text("目标包体（已锁定）")
                             .font(.subheadline)
-                        Text(summary)
-                            .font(.caption2)
+                        Text(app.bundlePath)
+                            .font(.system(.caption2, design: .monospaced))
                             .foregroundColor(.secondary)
-                            .lineLimit(2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
                 .padding(.vertical, 2)
             } else {
-                Text("还没有保存的自动任务：先把目标 App 与替换内容选好（改动会自动保存）。")
+                Text("先在上面选一个目标 App，包体会自动锁定为它的 .app。")
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }
+
+            Picker("语义", selection: $model.bundleSemantics) {
+                ForEach(ReplaceBundleSemantics.allCases) { semantics in
+                    Text(semantics.title).tag(semantics)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(model.bundleSemantics.subtitle)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            if let folder = model.bundleFolder {
+                Button {
+                    openBundleFolderBrowser(for: folder)
+                } label: {
+                    FolderRow(folder: folder)
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button {
+                        openBundleFolderBrowser(for: folder)
+                    } label: {
+                        Label("选择目标文件夹", systemImage: "folder")
+                    }
+                    Button {
+                        model.setBundleFolderTarget(path: "")
+                    } label: {
+                        Label("清除绑定", systemImage: "xmark.circle")
+                    }
+                    Button(role: .destructive) {
+                        model.removeBundleFolder()
+                    } label: {
+                        Label("移除源文件夹", systemImage: "trash")
+                    }
+                }
+            }
+
+            Button {
+                model.importBundleFolder()
+            } label: {
+                Label(model.bundleFolder == nil ? "添加源文件夹（整包换 / 并入）" : "替换源文件夹…",
+                      systemImage: "folder.badge.plus")
+            }
+
+            if model.bundleFiles.isEmpty {
+                Text("也可以加单个 / 多个文件：它们会在 .app 里按文件名自动匹配。")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+
+            ForEach(model.bundleFiles) { file in
+                Button {
+                    switch file.state {
+                    case .ambiguous:
+                        bundleCandidateSheet = file
+                    case .notFound, .unique, .manual:
+                        openBundleBrowser(for: file)
+                    }
+                } label: {
+                    WizardFileRow(file: file)
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button {
+                        openBundleBrowser(for: file)
+                    } label: {
+                        Label("浏览 .app 目录", systemImage: "folder")
+                    }
+                    Button {
+                        bundleManualSheet = file
+                    } label: {
+                        Label("手填完整路径", systemImage: "keyboard")
+                    }
+                    Button {
+                        model.clearBundleTarget(for: file.id)
+                    } label: {
+                        Label("清除绑定", systemImage: "xmark.circle")
+                    }
+                    Button(role: .destructive) {
+                        model.removeBundleFile(id: file.id)
+                    } label: {
+                        Label("从列表移除", systemImage: "trash")
+                    }
+                }
+            }
+
+            Button {
+                model.importBundleFiles()
+            } label: {
+                Label("添加文件…", systemImage: "doc.badge.plus")
+            }
         } header: {
-            Text("自动化")
+            Text("包体(.app) 内容")
         } footer: {
-            Text("自动执行会真的改目标 App 文件；每次都会强制开启备份并写运行记录，可在下方或「记录」页一键回滚。只有「启动时」与「激活成功后」两个触发点——iOS 不允许可靠的定时后台任务，所以没做定时。没有沙盒外读写权限时会跳过并写明原因，不会静默。")
+            Text("目标固定为所选 App 的包体。\(model.bundleSemantics == .mirror ? "镜像替换会把 .app 里你这份没有的文件删掉。" : "合并只覆盖同名文件，其余保持不动（改 .app 更安全）。")执行前强制整棵递归备份。⚠️ 改自签 App 的包体会破坏签名校验，可能导致它直接打不开；动手前确认你有重装手段（回滚需要备份完好）。")
+        }
+    }
+
+    /// 打开 .app 目录浏览器（根锁定为包体）
+    private func openBundleBrowser(for file: ReplaceWizardModel.WizardFile) {
+        guard let app = model.selectedApp else {
+            model.append("请先在上面选一个目标 App，再浏览它的包体", .error)
+            return
+        }
+        bundleBrowserRequest = BrowserRequest(file: file, app: app)
+    }
+
+    private func openBundleFolderBrowser(for folder: ReplaceWizardModel.WizardFolder) {
+        guard let app = model.selectedApp else {
+            model.append("请先在上面选一个目标 App，再浏览它的包体", .error)
+            return
+        }
+        bundleFolderBrowserRequest = FolderBrowserRequest(folder: folder, app: app)
+    }
+
+    // MARK: 自动化任务（用户显式保存 + 手动运行）
+
+    private var savedTasksSection: some View {
+        Section {
+            Button {
+                newTaskName = model.suggestedTaskName()
+                namingTask = true
+            } label: {
+                Label("保存当前设置为自动化任务", systemImage: "square.and.arrow.down")
+            }
+
+            if model.hasUnsavedChanges {
+                Text("当前绑定有改动还没保存——保存后才会出现在下面的任务列表里。")
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+            }
+
+            if model.savedTasks.isEmpty {
+                Text("还没有保存的任务：先把上面的模式、目标 App 与替换内容选好，再点「保存当前设置为自动化任务」。")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            } else {
+                // 固定高度可滚动（照 Morph 的日志区做法），任务多了也不遮屏
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(model.savedTasks) { saved in
+                            SavedTaskRow(saved: saved) {
+                                model.runSavedTask(saved)
+                            }
+                            .contextMenu {
+                                Button {
+                                    model.loadTaskIntoEditor(saved)
+                                } label: {
+                                    Label("载入编辑", systemImage: "square.and.pencil")
+                                }
+                                Button {
+                                    renameTarget = saved
+                                    renameText = saved.name
+                                } label: {
+                                    Label("重命名", systemImage: "pencil")
+                                }
+                                Button(role: .destructive) {
+                                    deleteTarget = saved
+                                } label: {
+                                    Label("删除", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(minHeight: 120, maxHeight: 260)
+            }
+        } header: {
+            Text("自动化任务")
+        } footer: {
+            Text("这些任务只有你点「运行」才会执行：App 不会在后台、也不会在启动时自动改文件。运行时一律强制开启备份并写运行记录，可在下方或「记录」页一键回滚；没有沙盒外读写权限时会提示先去设置页激活内核访问。")
         }
     }
 
@@ -1258,29 +1813,36 @@ struct ReplaceWizardView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("执行前自动备份")
                         .font(.subheadline)
-                    Text(model.mode == .folders
-                         ? "文件夹模式强制开启：目标文件夹会被整棵递归备份"
-                         : (model.autoBackup
+                    Text(model.mode == .files
+                         ? (model.autoBackup
                             ? "覆盖前把原件整份存到 Documents/Backups，随时可一键回滚"
-                            : "已关闭：覆盖后没有回滚兜底"))
+                            : "已关闭：覆盖后没有回滚兜底")
+                         : (model.mode == .folders
+                            ? "文件夹模式强制开启：目标文件夹会被整棵递归备份"
+                            : "包体模式强制开启：.app 会被整棵递归备份"))
                         .font(.caption2)
                         .foregroundColor(model.autoBackup ? .secondary : .orange)
                 }
             }
-            .disabled(model.mode == .folders)
+            .disabled(model.mode != .files)
 
             HStack {
-                Text(model.mode == .files ? "待替换文件" : "待替换文件夹")
+                Text(model.mode == .files ? "待替换文件" : (model.mode == .folders ? "待替换文件夹" : "待替换内容"))
                 Spacer()
                 Text("\(model.currentBoundCount) / \(model.currentItemCount) 个已绑定")
                     .foregroundColor(model.currentBoundCount > 0 ? .secondary : .orange)
             }
         } footer: {
-            Text(model.mode == .folders
-                 ? "文件夹模式为镜像替换：目标文件夹里源没有的旧文件会被移除。替换前会把整个目标文件夹递归备份到 Documents/Backups，写之前自动把目标父目录属主改成 mobile:mobile。"
-                 : (model.autoBackup
-                    ? "执行前会把每个被覆盖的目标整份备份到 Documents/Backups；写之前自动把目标父目录属主改成 mobile:mobile。"
-                    : "⚠️ 自动备份已关闭：覆盖后无法回滚，需要兜底就把上面的开关打开。"))
+            switch model.mode {
+            case .files:
+                Text(model.autoBackup
+                     ? "执行前会把每个被覆盖的目标整份备份到 Documents/Backups；写之前自动把目标父目录属主改成 mobile:mobile。"
+                     : "⚠️ 自动备份已关闭：覆盖后无法回滚，需要兜底就把上面的开关打开。")
+            case .folders:
+                Text("文件夹模式为镜像替换：目标文件夹里源没有的旧文件会被移除。替换前会把整个目标文件夹递归备份到 Documents/Backups，写之前自动把目标父目录属主改成 mobile:mobile。")
+            case .bundle:
+                Text("包体模式会把整个 .app 递归备份到 Documents/Backups，写之前自动把包体父目录属主改成 mobile:mobile。改自签 App 的包体可能让它打不开，回滚需要备份完好。")
+            }
         }
     }
 
@@ -1299,7 +1861,7 @@ struct ReplaceWizardView: View {
                         .frame(width: 28)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(model.lastRunWasFolders
-                             ? (model.lastRunSucceeded ? "文件夹替换成功" : "文件夹替换未完全成功")
+                             ? (model.lastRunSucceeded ? "整目录替换成功" : "整目录替换未完全成功")
                              : (model.lastRunSucceeded ? "替换成功" : "替换未完全成功"))
                             .font(.subheadline)
                         Text(summary)
@@ -1484,6 +2046,46 @@ private struct WizardFileRow: View {
 }
 
 // MARK: - 文件夹行
+
+// MARK: - 自动化任务一行
+
+private struct SavedTaskRow: View {
+    let saved: ReplaceSavedTask
+    let onRun: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: saved.task.mode.icon)
+                .font(.title3)
+                .foregroundColor(.accentColor)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(saved.name)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                Text(saved.summary)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Text(saved.task.mode == .bundle ? saved.task.bundlePath
+                                                : (saved.task.dataPath.isEmpty ? saved.task.bundlePath : saved.task.dataPath))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Button {
+                onRun()
+            } label: {
+                Label("运行", systemImage: "play.fill")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 2)
+    }
+}
 
 private struct FolderRow: View {
     let folder: ReplaceWizardModel.WizardFolder

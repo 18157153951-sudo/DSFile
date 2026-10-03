@@ -16,6 +16,8 @@ struct TargetFileBrowserSheet: View {
     let initialTarget: String?
     /// true = 文件夹模式：工具栏出现「选择此文件夹」，把当前所在目录当作目标
     let pickFolders: Bool
+    /// 非 nil = 根目录锁定在这个路径（包体(.app)模式用它把根固定为 .app，不显示根目录切换）
+    let lockedRoot: String?
     let onPick: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -40,28 +42,32 @@ struct TargetFileBrowserSheet: View {
          localFileName: String,
          initialTarget: String?,
          pickFolders: Bool = false,
+         lockedRoot: String? = nil,
          onPick: @escaping (String) -> Void) {
         self.app = app
         self.localFileName = localFileName
         self.initialTarget = initialTarget
         self.pickFolders = pickFolders
+        self.lockedRoot = lockedRoot
         self.onPick = onPick
 
-        // 初始根目录：优先跟着已绑定的路径走
+        // 初始根目录：优先跟着已绑定的路径走；锁定时固定为 .bundle 视图
         let dataPath = app.dataPath ?? ""
         let useBundle = initialTarget?.hasPrefix(app.bundlePath) == true && !app.bundlePath.isEmpty
-        _rootMode = State(initialValue: (useBundle || dataPath.isEmpty) ? .bundle : .data)
+        _rootMode = State(initialValue: (lockedRoot != nil || useBundle || dataPath.isEmpty) ? .bundle : .data)
     }
 
     var body: some View {
         NavigationView {
             List {
                 Section {
-                    Picker("根目录", selection: $rootMode) {
-                        Text("数据容器").tag(RootMode.data)
-                        Text("包体").tag(RootMode.bundle)
+                    if lockedRoot == nil {
+                        Picker("根目录", selection: $rootMode) {
+                            Text("数据容器").tag(RootMode.data)
+                            Text("包体").tag(RootMode.bundle)
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                 } footer: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("当前根目录：")
@@ -246,6 +252,8 @@ struct TargetFileBrowserSheet: View {
     // MARK: - 行为
 
     private var rootPath: String {
+        // 包体(.app)模式：根锁定在 .app，不跟随根目录切换
+        if let locked = lockedRoot, !locked.isEmpty { return locked }
         switch rootMode {
         case .data: return app.dataPath ?? ""
         case .bundle: return app.bundlePath

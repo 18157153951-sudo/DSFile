@@ -43,11 +43,18 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.3"
+    private static let appVersion = "0.3.4"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.4", date: "2026-10-03", items: [
+            "「替换」页新增包体(.app)模式：目标锁定为所选 App 的包体，可以放一个源文件夹（整包换 / 并入）或若干文件（按文件名匹配进 .app）",
+            "包体模式可选语义：「镜像替换」（整个 .app 换掉）或「仅覆盖同名文件」（合并，推荐）；两种都会先整棵递归备份",
+            "自动化改成「保存的任务 + 你自己运行」：点「保存当前设置为自动化任务」存成命名任务，之后在列表里点「运行」执行；可载入编辑 / 重命名 / 删除",
+            "去掉了「启动时自动执行」与「激活成功后自动执行」两个开关：App 不会在后台或启动时自动改文件",
+            "旧的自动任务会自动迁移成一条保存任务，不会丢配置"
+        ]),
         ChangeEntry(version: "0.3.3", date: "2026-10-03", items: [
             "新增「应用管理器」（文件页左上角方格图标）：列出已安装 App，长按一行可直接打开它的 .app 目录或数据容器",
             "应用管理器支持按 App 名 / bundle id 搜索；详情页可复制包体路径、数据容器路径、bundle id",

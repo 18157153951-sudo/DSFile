@@ -106,6 +106,44 @@ enum FileOperations {
         }
     }
 
+    /// 合并目录：把 source 里的文件/子目录递归写进 dest，**只覆盖同名项，dest 里其它内容保持不动**。
+    /// 备份同样由 RunStore 负责（调用前递归 capture dest，recursive: true）。
+    static func mergeDirectory(source: String, dest: String) throws {
+        let parent = (dest as NSString).deletingLastPathComponent
+        try withPermissionRetry([source, dest, parent]) {
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: dest) {
+                try fm.createDirectory(atPath: dest, withIntermediateDirectories: true)
+            }
+            _ = makeWritable(dest, recursive: true)
+            guard let enumerator = fm.enumerator(atPath: source) else {
+                throw FileSystemError.failed("无法遍历 \(source)")
+            }
+            for case let relative as String in enumerator {
+                let from = (source as NSString).appendingPathComponent(relative)
+                let to = (dest as NSString).appendingPathComponent(relative)
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: from, isDirectory: &isDir) else { continue }
+                if isDir.boolValue {
+                    if !fm.fileExists(atPath: to) {
+                        try fm.createDirectory(atPath: to, withIntermediateDirectories: true)
+                    }
+                    continue
+                }
+                let toParent = (to as NSString).deletingLastPathComponent
+                if !toParent.isEmpty, !fm.fileExists(atPath: toParent) {
+                    try fm.createDirectory(atPath: toParent, withIntermediateDirectories: true)
+                }
+                if !toParent.isEmpty { _ = makeWritable(toParent) }
+                if fm.fileExists(atPath: to) {
+                    _ = makeWritable(to)
+                    try fm.removeItem(atPath: to)
+                }
+                try fm.copyItem(atPath: from, toPath: to)
+            }
+        }
+    }
+
     static func move(_ source: String, to destination: String) throws {
         let sourceParent = (source as NSString).deletingLastPathComponent
         let destParent = (destination as NSString).deletingLastPathComponent

@@ -80,10 +80,10 @@ final class RecipeRunner {
 
         for (index, step) in recipe.steps.enumerated() {
             let op = step.op.lowercased()
-            if !["replace", "copy", "move", "replacedir", "mkdir", "delete", "chmod", "chown", "kill", "note"].contains(op) {
+            if !["replace", "copy", "move", "replacedir", "mergedir", "mkdir", "delete", "chmod", "chown", "kill", "note"].contains(op) {
                 problems.append("第 \(index + 1) 步的操作名不认识：\(step.op)")
             }
-            if ["replace", "copy", "move", "replacedir"].contains(op) && (step.source ?? "").isEmpty {
+            if ["replace", "copy", "move", "replacedir", "mergedir"].contains(op) && (step.source ?? "").isEmpty {
                 problems.append("第 \(index + 1) 步（\(op)）缺少 source")
             }
             if op != "kill" && op != "note" && (step.dest ?? "").isEmpty {
@@ -278,6 +278,36 @@ final class RecipeRunner {
                             apply ? .ok : .planned,
                             dirDestExists
                                 ? (apply ? "已镜像替换（原目录整棵已备份，旧文件已移除）" : "将镜像覆盖整个文件夹（旧文件会被移除）")
+                                : (apply ? "已新建" : "将新建"))
+
+            case "mergedir":
+                // 合并语义：只把源里有的文件写过去，目标里其余文件保持不动（改 .app 更安全）
+                guard let sourcePath = sourcePath, let destPath = destPath else {
+                    return make("参数不完整", .failed, "source/dest 不能为空")
+                }
+                guard FileSystemService.exists(sourcePath) else {
+                    return step.optional == true
+                        ? make(sourcePath, .skipped, "源文件夹不存在（可选步骤）")
+                        : make(sourcePath, .failed, "源文件夹不存在")
+                }
+                let mergeDestExists = FileSystemService.exists(destPath)
+                if apply {
+                    if options.fixOwnership {
+                        _ = FileOperations.makeWritable((destPath as NSString).deletingLastPathComponent)
+                    }
+                    if options.backup {
+                        // 合并可能覆盖目录里任意同名文件，所以整棵递归备份
+                        session?.capture(destPath, recursive: true)
+                    }
+                    try FileOperations.mergeDirectory(source: sourcePath, dest: destPath)
+                    if options.fixOwnership {
+                        _ = FileOperations.makeWritable(destPath)
+                    }
+                }
+                return make("\((sourcePath as NSString).lastPathComponent) → \(destPath)",
+                            apply ? .ok : .planned,
+                            mergeDestExists
+                                ? (apply ? "已合并（同名文件已覆盖，原目录整棵已备份）" : "将覆盖同名文件，目标里其它文件保留")
                                 : (apply ? "已新建" : "将新建"))
 
             case "mkdir":
