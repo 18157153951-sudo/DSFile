@@ -370,12 +370,24 @@ static uint32_t ds_cpu_family(void)
                                      userInfo:@{ NSLocalizedDescriptionKey: @"本次运行已尝试过内核漏洞，请重启 App 后再试" }];
         return DSKernelResultExploitFailed;
     }
-    gExploitAttempted = YES;
+    BOOL useKernel3105 = DS3105KernelUseKernelExploit();
 
     if (log) log([NSString stringWithFormat:@"[myfilza] 目标: %@ / iOS %@ / %@",
                   [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
-    if (log) log(@"[myfilza] 内核后端 = 3105（kexploit_opa334 + sandbox_escape + bad_query；与 FilzaJailedDS 互不共用代码）");
-    if (log) log(@"[myfilza] 开始执行 3105 内核链路（可能耗时数秒到数十秒，界面短暂无响应属正常）…");
+
+    if (useKernel3105) {
+        // 只有真正要跑内核漏洞时才计入「本进程已尝试过」——纯用户态令牌模式可以反复重试。
+        gExploitAttempted = YES;
+        // 先把警告写进 breadcrumb 与会话日志（两者都 fsync 过）：即使随后是内核 panic 或 exit()，
+        // 也能从落盘日志看到它死在哪个阶段。
+        ds_breadcrumb_write("[myfilza] 即将执行 3105 内核漏洞（用户显式开启）：只跑 kexploit_opa334 取内核读写，不调用 proc_self/sandbox_escape\n");
+        if (log) log(@"[myfilza] ⚠️ 即将执行 3105 内核漏洞（你在设置里显式开启了它）：该路径使用 DarkSword 内核漏洞，"
+                      "在你的设备上可能导致崩溃或重启。");
+        if (log) log(@"[myfilza] 内核后端 = 3105 · 内核读写（只跑 kexploit_opa334，不调用 3105 的 proc_self/sandbox_escape）+ 用户态令牌");
+    } else {
+        if (log) log(@"[myfilza] 内核后端 = 3105 · 仅用户态令牌（不执行内核漏洞：bad_query + ContainerManager 令牌，不会 panic）");
+    }
+    if (log) log(@"[myfilza] 开始执行 3105 链路（仅用户态通常很快；完整路径可能耗时数秒到数十秒，界面短暂无响应属正常）…");
 
     NSString *detail = nil;
     int ret = 1009;

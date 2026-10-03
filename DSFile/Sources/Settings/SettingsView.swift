@@ -43,11 +43,17 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.5.0"
+    private static let appVersion = "0.5.1"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.5.1", date: "2026-10-03", items: [
+            "**修掉 3105 模式一跑就闪退**：真机日志显示 3105 的 `proc_self()` 在这类机型上会拿 0 去读内核地址，而它的 `early_kread` 遇到非法地址是**原地自旋**，最后被系统 watchdog 杀掉进程（设备不重启、也没有崩溃日志）",
+            "3105 模式**默认改成纯用户态令牌**：只走 `bad_query`（ContainerManager 查询越权换沙盒扩展令牌），完全不执行内核漏洞，不会自旋也不会重启；容器访问照样可用",
+            "「使用内核漏洞」变成**需要你显式开启**的开关（默认关），开关旁写明风险；开启后**只跑 `kexploit_opa334` 取内核读写**，**不再调用** 3105 的 `proc_self` / `sandbox_escape`",
+            "执行内核阶段前会先往面包屑与会话日志各写一行（两者都 fsync 过），万一之后崩了，也能从落盘日志看出死在哪个阶段"
+        ]),
         ChangeEntry(version: "0.5.0", date: "2026-10-03", items: [
             "**新增第二个内核模式「3105」**（设置 → 内核模式里切换，默认仍是 FilzaJailedDS 2.2）：3105 自带更新的 offset 表，声明支持 iOS 17.0–18.7.1 / 26.0–26.6.1 / 27 beta，比现有后端覆盖更宽",
             "两个模式**互相独立**：各自跑自己的代码、各自的就绪状态，切换后需要重新点一次「激活内核访问」；默认模式的行为与之前完全一致（只做加法，没有合并）",
@@ -222,6 +228,9 @@ struct SettingsView: View {
 
     @AppStorage("myfilza.kernelBackend") private var kernelBackend: String = "filzajailedds"
 
+    /// 与 DS3105Kernel.h 的 DS3105KernelUseKernelExploitKey 保持一致：3105 模式是否使用内核漏洞（**默认关**）
+    @AppStorage("myfilza.3105UseKernelExploit") private var useKernelExploit3105: Bool = false
+
     private var backendSection: some View {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let major = v.majorVersion, minor = v.minorVersion, patch = v.patchVersion
@@ -255,7 +264,32 @@ struct SettingsView: View {
                        range: "iOS 17.0–18.7.1 / 26.0–26.6.1 / 27 beta",
                        inRange: t3105InRange,
                        selected: using3105,
-                       note: "上游 3105 自带更新的 offset 表，覆盖到 26.x / 27 beta；逃逸失败时还会自动尝试 bad_query（MCM 沙盒扩展令牌）。")
+                       note: "默认只走**纯用户态令牌**（bad_query：ContainerManager 查询越权换沙盒扩展令牌），不碰内核、不会自旋或重启；需要内核读写时可在下面显式开启（有风险）。")
+
+            if using3105 {
+                Toggle(isOn: $useKernelExploit3105) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("使用内核漏洞（不推荐）")
+                            .font(.subheadline)
+                        Text(useKernelExploit3105
+                             ? "已开启：会先跑 kexploit_opa334 取内核读写（仍有崩溃 / 重启风险）"
+                             : "默认关闭：只走纯用户态令牌，完全不执行内核代码")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("该路径使用 DarkSword 内核漏洞，在你的设备上可能导致崩溃或重启",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.caption)
+                    Text("真机实测：3105 的 proc_self 在 so_background_thread 为 0 的机型上会拿 0 去读内核地址，而它的 early_kread 遇到非法地址是**原地自旋**，会被系统杀掉进程（设备不重启、也没有崩溃日志）。开启后我们只跑 kexploit_opa334 取内核读写，**不会**调用 proc_self / sandbox_escape。建议仅在「仅令牌模式拿不到访问」时再打开。")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 2)
+            }
 
             if !selectedInRange {
                 VStack(alignment: .leading, spacing: 6) {

@@ -41,4 +41,28 @@ FOUNDATION_EXPORT BOOL DS3105KernelIsReady(void);
 /// 最近一次执行到哪个阶段（失败时用于定位）
 FOUNDATION_EXPORT NSString *DS3105KernelLastStage(void);
 
+#pragma mark - 用户态令牌路径（默认走这条，不碰内核）
+
+/// 「3105 模式是否使用内核漏洞」开关的 UserDefaults 键。默认 **NO**。
+FOUNDATION_EXPORT NSString * const DS3105KernelUseKernelExploitKey;   // myfilza.3105UseKernelExploit
+
+/// 是否使用内核漏洞（默认 NO）。
+///
+///   NO（默认，安全）—— 只走 bad_query + mcm_bridge 这条**纯用户态**路径：
+///       dlopen ContainerManager → container_query 路径穿越
+///       → container_copy_sandbox_token → sandbox_extension_consume。
+///       完全不执行 kexploit_opa334，不会 panic、不会重启设备。
+///
+///   YES（用户显式开启）—— 先跑 DarkSword 内核漏洞（kexploit_opa334）→ proc_self →
+///       sandbox_escape，失败再回退 bad_query。用户真机反馈：该路径在 iPhone13,4 / iOS 18.5
+///       上会崩溃（且可能连崩溃日志都留不下 → 内核 panic 或被 kill），故默认关闭。
+FOUNDATION_EXPORT BOOL DS3105KernelUseKernelExploit(void);
+
+/// 只走用户态令牌（不跑内核漏洞）的激活入口，返回码语义与 DS3105KernelActivate 一致。
+FOUNDATION_EXPORT int DS3105KernelActivateUserspaceOnly(NSString *_Nullable *_Nullable detail);
+
+/// 按需为某个沙盒外路径补取一次用户态令牌（纯用户态）。已经取过的路径直接返回 YES。
+/// 用于「替换目标在 /var/mobile 之外」时补权限，不需要重跑任何内核代码。
+FOUNDATION_EXPORT BOOL DS3105KernelEnsureAccessForPath(NSString *path);
+
 NS_ASSUME_NONNULL_END
