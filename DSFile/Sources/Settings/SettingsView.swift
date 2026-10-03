@@ -43,11 +43,18 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.7"
+    private static let appVersion = "0.3.8"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.8", date: "2026-10-03", items: [
+            "目录浏览器右上角现在**始终有「选择此文件夹」**：在包体(.app)模式里进到某一层文件夹按它，就直接把**这个文件夹**当成目标（在根目录按 = 整个 .app）；文件夹模式同样可用",
+            "文件模式只能选文件时，这个按钮会置灰并在下方写明原因，不会再让人以为坏了",
+            "多选勾选状态下按钮文案变成「用此文件夹」，语义不变（把当前文件夹作为一条绑定加进去），不会和「选择」混淆",
+            "**目录切换加了过渡动画**：进子目录从右侧滑入、返回上级从左侧滑入，都带淡入淡出（0.22 秒 easeInOut）；「文件」页与目标浏览器都生效",
+            "修复：包体模式还没添加源文件夹时按「选择此文件夹」原本静默无反应，现在会明确提示先添加源文件夹"
+        ]),
         ChangeEntry(version: "0.3.7", date: "2026-10-03", items: [
             "新增「目标优先」绑定：在文件模式与包体(.app)模式里，先点「添加目标文件」在目标 App 目录里挑出**要替换掉的那个文件**（支持多选），App 会自动在本机找同名文件配上；同名多处让你选，一个都没有就直接弹本机选择器让你挑",
             "这样绑定的目标路径会被锁定，自动匹配不会再把它改掉；点那一行 = 更换本地替换文件，长按可重新选目标路径 / 手填 / 清除绑定",

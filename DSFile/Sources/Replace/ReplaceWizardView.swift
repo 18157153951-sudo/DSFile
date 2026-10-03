@@ -750,7 +750,10 @@ final class ReplaceWizardModel: ObservableObject {
     }
 
     func setBundleFolderTarget(path: String) {
-        guard var folder = bundleFolder else { return }
+        guard var folder = bundleFolder else {
+            append("还没有源文件夹：请先点「添加源文件夹」，再用「选择此文件夹」指定它在 .app 里的目标。", .warning)
+            return
+        }
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         folder.targetPath = trimmed.isEmpty ? nil : trimmed
         bundleFolder = folder
@@ -1330,7 +1333,8 @@ struct ReplaceWizardView: View {
             .sheet(item: $browserRequest) { request in
                 TargetFileBrowserSheet(app: request.app,
                                        localFileName: request.file.name,
-                                       initialTarget: request.file.targetPath) { path in
+                                       initialTarget: request.file.targetPath,
+                                       folderPickHint: Self.folderPickHintForFileMode) { path in
                     model.setTarget(path: path, for: request.file.id, manual: true)
                     browserRequest = nil
                 }
@@ -1370,7 +1374,8 @@ struct ReplaceWizardView: View {
                 TargetFileBrowserSheet(app: request.app,
                                        localFileName: request.file.name,
                                        initialTarget: request.file.targetPath,
-                                       lockedRoot: request.app.bundlePath) { path in
+                                       lockedRoot: request.app.bundlePath,
+                                       onPickFolder: pickBundleFolderTarget) { path in
                     model.setBundleTarget(path: path, for: request.file.id, manual: true)
                     bundleBrowserRequest = nil
                 }
@@ -1395,6 +1400,8 @@ struct ReplaceWizardView: View {
                                        initialTarget: nil,
                                        lockedRoot: request.inBundle ? request.app.bundlePath : nil,
                                        allowsMultipleSelection: true,
+                                       onPickFolder: request.inBundle ? pickBundleFolderTarget : nil,
+                                       folderPickHint: request.inBundle ? nil : Self.folderPickHintForFileMode,
                                        onPickMany: { paths in
                                            let unmatched = model.addTargets(paths, inBundle: request.inBundle)
                                            targetFirstRequest = nil
@@ -1588,6 +1595,15 @@ struct ReplaceWizardView: View {
         case .bundle:
             bundleSection
         }
+    }
+
+    /// 文件模式只能选文件：右上角「选择此文件夹」会禁用，原因写在浏览器 footer 里
+    private static let folderPickHintForFileMode =
+        "文件模式只能选文件；要替换整个文件夹，请切到「文件夹模式」或「包体(.app)模式」。"
+
+    /// 目标浏览器右上角「选择此文件夹」→ 把当前所在目录设成包体源文件夹的目标
+    private func pickBundleFolderTarget(_ path: String) {
+        model.setBundleFolderTarget(path: path)
     }
 
     /// 工具栏「+」：按当前模式走对应的导入入口。

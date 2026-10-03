@@ -20,8 +20,16 @@ struct TargetFileBrowserSheet: View {
     let lockedRoot: String?
     /// true = 多选：右上角出现「选择」，勾选多个文件后一次性回调（目标优先绑定用）
     let allowsMultipleSelection: Bool
+    /// 右上角「选择此文件夹」的回调（优先级最高）。
+    /// 为 nil 时：pickFolders == true 就走 onPick(当前目录)；否则按钮**禁用**（禁用原因见 folderPickHint）。
+    let onPickFolder: ((String) -> Void)?
+    /// 不能选文件夹时，footer 里说明原因（例如「文件模式只能选文件」）
+    let folderPickHint: String?
     let onPickMany: (([String]) -> Void)?
     let onPick: (String) -> Void
+
+    /// 目录切换方向：决定过渡动画从哪一侧滑入
+    private enum NavDirection { case forward, backward }
 
     @Environment(\.dismiss) private var dismiss
 
@@ -35,6 +43,8 @@ struct TargetFileBrowserSheet: View {
     /// 多选模式：是否处于勾选状态、已勾选的路径
     @State private var isSelecting = false
     @State private var selection: Set<String> = []
+    /// 最近一次目录切换的方向（进入子目录 = forward，返回上级 = backward），只影响过渡动画
+    @State private var navDirection: NavDirection = .forward
 
     enum RootMode: String, CaseIterable, Identifiable {
         case data
@@ -50,6 +60,8 @@ struct TargetFileBrowserSheet: View {
          pickFolders: Bool = false,
          lockedRoot: String? = nil,
          allowsMultipleSelection: Bool = false,
+         onPickFolder: ((String) -> Void)? = nil,
+         folderPickHint: String? = nil,
          onPickMany: (([String]) -> Void)? = nil,
          onPick: @escaping (String) -> Void) {
         self.app = app
@@ -58,6 +70,8 @@ struct TargetFileBrowserSheet: View {
         self.pickFolders = pickFolders
         self.lockedRoot = lockedRoot
         self.allowsMultipleSelection = allowsMultipleSelection
+        self.onPickFolder = onPickFolder
+        self.folderPickHint = folderPickHint
         self.onPickMany = onPickMany
         self.onPick = onPick
 
@@ -83,9 +97,15 @@ struct TargetFileBrowserSheet: View {
                         Text("当前根目录：")
                         Text(rootPath.isEmpty ? "（没有这个容器）" : rootPath)
                             .font(.system(.caption2, design: .monospaced))
+                        Text("右上角「选择此文件夹」= 把**当前所在目录**当成目标；在根目录按它就是整个\(rootMode.title)。")
+                            .foregroundColor(.orange)
                         if pickFolders {
                             Text("进到想替换的那个文件夹里，再点右上角「选择此文件夹」。")
                                 .foregroundColor(.orange)
+                        }
+                        if let hint = folderPickHint {
+                            Text(hint)
+                                .foregroundColor(.secondary)
                         }
                     }
                     .font(.footnote)
@@ -172,6 +192,8 @@ struct TargetFileBrowserSheet: View {
                             .font(.footnote)
                             .foregroundColor(.secondary)
                     } else {
+                        // 目录切换过渡动画：进入子目录从右侧滑入、返回上级从左侧滑入，都带淡入淡出。
+                        // .id(currentPath) 让 SwiftUI 把这批行当成「新内容」，从而走下面的 transition。
                         ForEach(items) { item in
                             Button {
                                 handle(item)
@@ -180,6 +202,11 @@ struct TargetFileBrowserSheet: View {
                             }
                             .buttonStyle(.plain)
                         }
+                        .transition(.asymmetric(
+                            insertion: .move(edge: navDirection == .forward ? .trailing : .leading).combined(with: .opacity),
+                            removal: .move(edge: navDirection == .forward ? .leading : .trailing).combined(with: .opacity)
+                        ))
+                        .id(currentPath)
                     }
 
                     if allowsMultipleSelection && isSelecting {
@@ -206,14 +233,25 @@ struct TargetFileBrowserSheet: View {
                 // 注意：条件必须写在 ToolbarItem 的「内容」里。
                 // 直接对 ToolbarItem 本身用 if 会走 ToolbarContentBuilder 的 buildIf（iOS 16+），
                 // 而本 App 最低支持 iOS 15。
+                //
+                // 右上角这个按钮在所有模式下都存在，语义统一 =「选择当前所在的这个文件夹」：
+                //   · 传了 onPickFolder（目标优先绑定等）→ 用它的回调；
+                //   · pickFolders = true（文件夹模式）→ 走 onPick(当前目录)；
+                //   · 都不满足（例如文件模式只能选文件）→ 按钮**禁用**，原因写在 footer 的 folderPickHint 里。
                 ToolbarItem(placement: .confirmationAction) {
-                    if pickFolders {
-                        Button("选择此文件夹") {
-                            onPick(currentPath)
-                            dismiss()
+                    Button(confirmFolderTitle) {
+                        let path = currentPath.isEmpty ? rootPath : currentPath
+                        if let onPickFolder = onPickFolder {
+                            onPickFolder(path)
+                        } else {
+                            onPick(path)
                         }
-                        .disabled(!hasFileAccess || currentPath.isEmpty)
-                    } else if allowsMultipleSelection {
+                        dismiss()
+                    }
+                    .disabled(!canConfirmFolder)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if allowsMultipleSelection {
                         Button(isSelecting ? "完成" : "选择") {
                             isSelecting.toggle()
                             if !isSelecting { selection.removeAll() }
@@ -231,9 +269,13 @@ struct TargetFileBrowserSheet: View {
                     }
                 }
             }
+            .animation(.easeInOut(duration: 0.22), value: currentPath)
             .onAppear(perform: prepare)
             .onChange(of: rootMode) { _ in
-                currentPath = rootPath
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    navDirection = .backward
+                    currentPath = rootPath
+                }
                 reload()
             }
             .onChange(of: showHidden) { _ in
@@ -308,6 +350,20 @@ struct TargetFileBrowserSheet: View {
         return tail.isEmpty ? "" : tail
     }
 
+    /// 右上角确认按钮的文案：多选勾选态下叫「用此文件夹」，免得和「选择」混淆
+    private var confirmFolderTitle: String {
+        (allowsMultipleSelection && isSelecting) ? "用此文件夹" : "选择此文件夹"
+    }
+
+    /// 能不能把「当前所在目录」当作目标：
+    /// 传了 onPickFolder、或 pickFolders = true 时才可以；否则按钮禁用（原因写在 footer 的 folderPickHint 里）。
+    private var canConfirmFolder: Bool {
+        guard hasFileAccess else { return false }
+        let path = currentPath.isEmpty ? rootPath : currentPath
+        guard !path.isEmpty else { return false }
+        return onPickFolder != nil || pickFolders
+    }
+
     private func prepare() {
         hasFileAccess = EnvironmentProbe.hasFileSystemAccess()
         if !hasFileAccess { return }
@@ -340,7 +396,10 @@ struct TargetFileBrowserSheet: View {
 
     private func handle(_ item: PathItem) {
         if item.isDirectory && !item.isSymlink {
-            currentPath = item.path
+            withAnimation(.easeInOut(duration: 0.22)) {
+                navDirection = .forward
+                currentPath = item.path
+            }
             reload()
             return
         }
@@ -362,10 +421,10 @@ struct TargetFileBrowserSheet: View {
 
     private func goUp() {
         guard currentPath != rootPath, let parent = FileSystemService.parent(of: currentPath) else { return }
-        if parent.count < rootPath.count {
-            currentPath = rootPath
-        } else {
-            currentPath = parent
+        let target = parent.count < rootPath.count ? rootPath : parent
+        withAnimation(.easeInOut(duration: 0.22)) {
+            navDirection = .backward
+            currentPath = target
         }
         reload()
     }

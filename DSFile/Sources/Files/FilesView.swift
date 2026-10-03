@@ -22,9 +22,14 @@ struct PathBookmark: Identifiable, Hashable {
     var id: String { path }
 }
 
+/// 目录切换方向：决定过渡动画从哪一侧滑入（文件页与「替换」页的目标浏览器共用同一套语义）
+enum NavDirection { case forward, backward }
+
 final class BrowserModel: ObservableObject {
 
     @Published var currentPath: String = "/"
+    /// 最近一次目录切换的方向：只影响过渡动画（进子目录从右滑入、返回上级从左滑入）
+    @Published var navDirection: NavDirection = .forward
     @Published var items: [PathItem] = []
     @Published var showHidden: Bool = false
     @Published var sortKey: PathSortKey = .name
@@ -52,7 +57,18 @@ final class BrowserModel: ObservableObject {
     }
 
     func load(path: String? = nil) {
-        if let path = path { currentPath = path }
+        // 目录切换加一点过渡动画（与「替换」页的目标浏览器保持一致的时长与曲线）。
+        // 方向自动判断：新路径比当前路径更深（是它的子路径）＝进入子目录，否则＝返回上级。
+        // 这里只做轻量的 withAnimation + 路径栏的滑动过渡：文件页的 List 还挂着搜索/编辑/多选/
+        // 属性面板，给它加 .id(currentPath) 会重建行标识、有打断这些状态的风险，所以列表本身
+        // 只做隐式过渡（行内容变化照样有动画），行为零变化。
+        if let path = path {
+            let goingForward = path.count > currentPath.count && path.hasPrefix(currentPath)
+            withAnimation(.easeInOut(duration: 0.22)) {
+                currentPath = path
+                navDirection = goingForward ? .forward : .backward
+            }
+        }
         let target = currentPath
         let hidden = showHidden
         let key = sortKey
@@ -273,6 +289,13 @@ struct FilesView: View {
             }
         }
         .padding(.bottom, 6)
+        // 路径栏跟着目录切换一起滑动 + 淡入淡出。
+        // 只给这条「没有内部状态」的路径栏换标识，安全；列表本身保持 identity 不变。
+        .id(browser.currentPath)
+        .transition(.asymmetric(
+            insertion: .move(edge: browser.navDirection == .forward ? .trailing : .leading).combined(with: .opacity),
+            removal: .move(edge: browser.navDirection == .forward ? .leading : .trailing).combined(with: .opacity)
+        ))
     }
 
     private var filterBar: some View {
@@ -345,6 +368,8 @@ struct FilesView: View {
             }
         }
         .listStyle(.insetGrouped)
+        // 目录切换时列表内容的变化也跟着动画（行为不变，只是把突变变成 0.22s 的过渡）
+        .animation(.easeInOut(duration: 0.22), value: browser.currentPath)
         .refreshable {
             browser.reload()
         }
