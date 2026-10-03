@@ -41,21 +41,26 @@ FOUNDATION_EXPORT BOOL DS3105KernelIsReady(void);
 /// 最近一次执行到哪个阶段（失败时用于定位）
 FOUNDATION_EXPORT NSString *DS3105KernelLastStage(void);
 
-#pragma mark - 用户态令牌路径（默认走这条，不碰内核）
+/// 把本进程 cred 的 posix_cred 改成 root（cr_uid/cr_ruid/cr_svuid/cr_groups[0]/cr_rgid/cr_svgid 全 0）。
+/// 只用 3105 自己的原语（t3105_kread*/t3105_kwrite*），**不共用** FilzaJailedDS 的 kread/kwrite——
+/// 两个后端各自建立自己的 socket 原语，混用会野读。
+/// 返回 0 = 已确认 cr_uid == 0；1010 = 找不到 cred；1011 = cred 地址未过校验；1012 = 回读 cr_uid 仍非 0。
+FOUNDATION_EXPORT int DS3105KernelElevateToRoot(NSString *_Nullable *_Nullable detail);
 
-/// 「3105 模式是否使用内核漏洞」开关的 UserDefaults 键。默认 **NO**。
+#pragma mark - 用户态令牌路径（备选分支）
+
+/// 「3105 模式是否使用内核漏洞」开关的 UserDefaults 键。默认 **YES**。
 FOUNDATION_EXPORT NSString * const DS3105KernelUseKernelExploitKey;   // myfilza.3105UseKernelExploit
 
-/// 是否使用内核漏洞（默认 NO）。
+/// 是否使用内核漏洞（默认 **YES**）。
 ///
-///   NO（默认，安全）—— 只走 bad_query + mcm_bridge 这条**纯用户态**路径：
-///       dlopen ContainerManager → container_query 路径穿越
-///       → container_copy_sandbox_token → sandbox_extension_consume。
-///       完全不执行 kexploit_opa334，不会 panic、不会重启设备。
+///   YES（默认）—— 走 3105 自己的 kexploit_opa334 拿内核读写，再用**我们当年在 Filza 那条路上
+///       验证成功的 cred 路线**做逃逸（无条件 XPACI + cred→label→sandbox→ext_set 三步改写）。
+///       这是 18.x 上真正能拿到沙盒外读写的那条路；3105 本体在 iOS < 26 时也保留内核 R/W 继续工作。
+///       注意：这条路径**绝不调用** 3105 的 proc_self / sandbox_escape（本机会自旋被 watchdog 杀）。
 ///
-///   YES（用户显式开启）—— 先跑 DarkSword 内核漏洞（kexploit_opa334）→ proc_self →
-///       sandbox_escape，失败再回退 bad_query。用户真机反馈：该路径在 iPhone13,4 / iOS 18.5
-///       上会崩溃（且可能连崩溃日志都留不下 → 内核 panic 或被 kill），故默认关闭。
+///   NO —— 只走 bad_query + mcm_bridge 纯用户态令牌。仅 iOS 26+ 有意义：18.5 上
+///       libsystem_containermanager 缺 container_query_operation_set_part* 符号 → 0 条令牌。
 FOUNDATION_EXPORT BOOL DS3105KernelUseKernelExploit(void);
 
 /// 只走用户态令牌（不跑内核漏洞）的激活入口，返回码语义与 DS3105KernelActivate 一致。

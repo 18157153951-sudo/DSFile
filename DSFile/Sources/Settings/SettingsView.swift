@@ -43,11 +43,19 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.5.1"
+    private static let appVersion = "0.6.0"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.6.0", date: "2026-10-04", items: [
+            "**3105 模式改用真正能用的那条路**：内核读写（3105 自带运行时 offset 反推的 `kexploit_opa334`）+ **cred 路线逃逸**（两个 socket 的 `so_cred` 指向同一对象 + `cr_uid` 校验定位 ucred，再走 `cred → label → sandbox → ext_set` 三步改写）—— 也就是当初 Filza 那条路上验证成功的那套，原语换成 3105 自己的",
+            "**修掉 3105 模式取不到容器访问**：真机取证发现 iOS 18.5 的 ContainerManager 里**没有** `container_query_operation_set_part` / `…_set_part_domain` 两个符号，所以 `bad_query` 在 18.x 上必然返回 -1；它只在 iOS 26+ 才有意义，现在降级为备选分支",
+            "**XPACI 改成无条件裸汇编**：3105 的 `S()` 宏只在 `#ifdef __arm64e__` 下才编译出真正的 XPACI 指令，而本 App 产物是 arm64 —— 直接用它会把带 PAC 签名的 `cr_label` 解引用到错误地址",
+            "两个阶段**互相独立、都会尝试**：内核阶段失败不会中止容器访问阶段，最终失败信息会**同时列出**两个阶段各自的原因",
+            "**提权也按后端分派**：3105 模式下用 3105 自己的原语改写 cred（不再误用 FilzaJailedDS 的原语，避免拿未初始化的原语野读内核）",
+            "内核阶段的日志与面包屑改成**纯 ASCII**（修掉日志里的中文乱码）"
+        ]),
         ChangeEntry(version: "0.5.1", date: "2026-10-03", items: [
             "**修掉 3105 模式一跑就闪退**：真机日志显示 3105 的 `proc_self()` 在这类机型上会拿 0 去读内核地址，而它的 `early_kread` 遇到非法地址是**原地自旋**，最后被系统 watchdog 杀掉进程（设备不重启、也没有崩溃日志）",
             "3105 模式**默认改成纯用户态令牌**：只走 `bad_query`（ContainerManager 查询越权换沙盒扩展令牌），完全不执行内核漏洞，不会自旋也不会重启；容器访问照样可用",

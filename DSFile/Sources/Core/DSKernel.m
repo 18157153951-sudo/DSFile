@@ -586,6 +586,35 @@ static uint32_t ds_cpu_family(void)
     }
 
     if (log) log(@"[myfilza] 尝试把本进程凭据改成 root（改写 ucred 里的 posix_cred）…");
+
+    // 3105 模式必须用 3105 自己的原语提权：两个后端各自建立自己的 socket 原语，
+    // 在 3105 模式下调用 DSCredEscape*（FilzaJailedDS 原语）会拿着未初始化的原语野读内核。
+    if (DS3105KernelSelected()) {
+        ds_breadcrumb_write("[myfilza] 提权开始（3105 后端：t3105 原语）\n");
+        if (!DS3105KernelIsReady()) {
+            if (log) log(@"[myfilza] 提权未执行：3105 后端不在就绪状态（请先点「激活内核访问」并等它成功）");
+            ds_breadcrumb_write("[myfilza] 提权未执行：DS3105KernelIsReady() = false\n");
+            return DSKernelResultExploitFailed;
+        }
+        int ret3105 = 1010;
+        NSString *d3105 = nil;
+        @try {
+            ret3105 = DS3105KernelElevateToRoot(&d3105);
+        } @catch (NSException *e) {
+            if (log) log([NSString stringWithFormat:@"[myfilza] 3105 提权异常: %@", e.reason]);
+        }
+        if (log) log([NSString stringWithFormat:@"[myfilza] DS3105KernelElevateToRoot() 返回 %d；%@；当前 uid=%d",
+                      ret3105, d3105 ?: @"（无详情）", (int)getuid()]);
+        ds_breadcrumb_write("[myfilza] DS3105KernelElevateToRoot() 返回 %d；uid=%d\n", ret3105, (int)getuid());
+        if (getuid() == 0) {
+            if (log) log(@"[myfilza] 提权成功（3105 后端），当前 uid=0");
+            return DSKernelResultOK;
+        }
+        if (log) log([NSString stringWithFormat:
+                      @"[myfilza] 3105 提权失败（返回码 %d）：失败不影响已获得的文件系统访问", ret3105]);
+        return DSKernelResultExploitFailed;
+    }
+
     ds_breadcrumb_write("[myfilza] 提权开始（cred 路线）\n");
 
     DSCredEscapeSetLogCallback(ds_escape_log_bridge);
