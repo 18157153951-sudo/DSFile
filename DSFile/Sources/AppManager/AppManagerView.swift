@@ -39,6 +39,11 @@ struct AppManagerView: View {
                     }
                 }
                 .onAppear(perform: prepare)
+                .onReceive(NotificationCenter.default.publisher(for: .myfilzaFileSystemAccessChanged)) { _ in
+                    // 激活成功 / 提权成功：权限变了，重扫一次（否则会一直显示激活前的空列表）
+                    hasAccess = EnvironmentProbe.hasFileSystemAccess()
+                    if hasAccess { load(force: true) }
+                }
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }

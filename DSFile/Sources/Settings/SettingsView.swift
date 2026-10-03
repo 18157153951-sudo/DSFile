@@ -43,11 +43,17 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.4"
+    private static let appVersion = "0.3.5"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.5", date: "2026-10-03", items: [
+            "修复：点「添加源文件夹」会把 App 直接搞崩（系统选择器在转场中被重复呈现）。现在所有系统选择器 / 分享面板都从专用宿主排队呈现，出错只会提示并写日志",
+            "修复：激活成功后替换页一直显示「获取到 0 个 app」，要先去文件页逛一圈才恢复。现在激活成功会立刻作废缓存并重扫 App 列表",
+            "「目标 App」区新增「重新扫描 App」按钮，空列表时也有明确出路提示",
+            "应用管理器与文件页也会在权限变化后自动刷新"
+        ]),
         ChangeEntry(version: "0.3.4", date: "2026-10-03", items: [
             "「替换」页新增包体(.app)模式：目标锁定为所选 App 的包体，可以放一个源文件夹（整包换 / 并入）或若干文件（按文件名匹配进 .app）",
             "包体模式可选语义：「镜像替换」（整个 .app 换掉）或「仅覆盖同名文件」（合并，推荐）；两种都会先整棵递归备份",

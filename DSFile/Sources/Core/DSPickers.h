@@ -46,6 +46,15 @@ typedef void (^DSPickerCancelHandler)(void);
 /// 当前最顶层的 UIViewController（找不到返回 nil）
 + (nullable UIViewController *)topViewController NS_SWIFT_NAME(topViewController());
 
+/// 出错时的日志回调：Swift 侧接到 DSLog.shared.error，方便在会话日志里看到原因
++ (void)setErrorLogHandler:(nullable void (^)(NSString *message))handler
+    NS_SWIFT_NAME(setErrorLogHandler(_:));
+
+/// 双保险：Swift 无法捕获 ObjC 异常，用它把调用包起来。
+/// 内部异常会被捕获、写日志并给用户提示，返回 NO（调用方可以据此提示用户）。
++ (BOOL)performSafely:(void (NS_NOESCAPE ^)(void))block label:(NSString *)label
+    NS_SWIFT_NAME(performSafely(_:label:));
+
 @end
 
 NS_ASSUME_NONNULL_END

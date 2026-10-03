@@ -17,6 +17,11 @@ struct DSFileApp: App {
     init() {
         // 越早越好：内核漏洞跑挂时，把信号与回溯写进 Documents/Logs/crash-*.log
         DSCrash.install()
+        // 系统选择器 / 分享面板出错时，把原因写进会话日志。
+        // DSPickers 内部全程 @try/@catch，所以最坏情况是「提示 + 日志」，不会把 App 带走。
+        DSPickers.setErrorLogHandler { message in
+            DSLog.shared.error(message, source: "选择器")
+        }
     }
 
     var body: some Scene {

@@ -172,15 +172,36 @@ final class ReplaceWizardModel: ObservableObject {
 
     // MARK: - 目标 App
 
-    func loadApps() {
+    func loadApps(force: Bool = false) {
         isScanningApps = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let list = AppScanner.installedApps()
+            let list = AppScanner.installedApps(force: force)
             DispatchQueue.main.async {
                 self.apps = list
                 self.isScanningApps = false
-                self.append("扫描到 \(list.count) 个已安装 App", .info)
+                let access = EnvironmentProbe.hasFileSystemAccess()
+                self.append("扫描到 \(list.count) 个已安装 App（文件系统访问=\(access ? "是" : "否")）",
+                            list.isEmpty ? .warning : .info)
             }
+        }
+    }
+
+    /// 双保险：DSPickers 内部已经 catch 了所有异常，这里再包一层，
+    /// 保证「添加源文件夹」这类入口在任何情况下都只是提示 + 写日志，不会把 App 带走。
+    func withPickerSafety(_ label: String, _ body: () -> Void) {
+        let ok = DSPickers.performSafely({ body() }, label: label)
+        if !ok {
+            append("\(label) 失败：系统选择器打不开（原因已写进日志）。", .error)
+        }
+    }
+
+    /// 进页面时用：列表是空的、而且现在已经有权限 → 强制重扫一次。
+    /// （激活成功后列表本来就会被通知刷新；这里兜住「先开替换页、后激活」的顺序。）
+    func loadAppsIfNeeded() {
+        if apps.isEmpty && EnvironmentProbe.hasFileSystemAccess() {
+            loadApps(force: true)
+        } else {
+            loadApps()
         }
     }
 
@@ -546,7 +567,7 @@ final class ReplaceWizardModel: ObservableObject {
 
     /// 包体模式：导入一个源文件夹（整包换 / 并入）
     func importBundleFolder() {
-        DSPickers.presentFolderPickerAsCopy(completion: { urls in
+        withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerAsCopy(completion: { urls in
             guard let url = urls.first else { return }
             let fm = FileManager.default
             try? fm.createDirectory(atPath: self.folderSourceDirectory, withIntermediateDirectories: true)
@@ -559,7 +580,7 @@ final class ReplaceWizardModel: ObservableObject {
             }
             self.reloadBundleFolder(preferred: destination)
             self.markDirty()
-        }, cancel: nil)
+        }, cancel: nil) }
     }
 
     /// 重新统计包体模式的源文件夹（保留已绑定的目标；新导入时默认目标就是目标 App 的 .app）
@@ -631,7 +652,7 @@ final class ReplaceWizardModel: ObservableObject {
     }
 
     func importFolders() {
-        DSPickers.presentFolderPickerAsCopy(completion: { urls in
+        withPickerSafety("添加源文件夹") { DSPickers.presentFolderPickerAsCopy(completion: { urls in
             guard let url = urls.first else { return }
             let fm = FileManager.default
             try? fm.createDirectory(atPath: self.folderSourceDirectory, withIntermediateDirectories: true)
@@ -645,7 +666,7 @@ final class ReplaceWizardModel: ObservableObject {
             }
             self.reloadFolders()
             self.markDirty()
-        }, cancel: nil)
+        }, cancel: nil) }
     }
 
     func removeFolder(id: UUID) {
@@ -1276,7 +1297,7 @@ struct ReplaceWizardView: View {
                 model.reloadBundleFiles()
                 model.reloadBundleFolder()
                 model.reloadSavedTasks()
-                model.loadApps()
+                model.loadAppsIfNeeded()
                 model.append("提示：每次替换前都会整份备份（文件夹 / 包体模式是整棵递归备份），随时可以在下方或「记录」页一键回滚。", .info)
             }
             .onReceive(NotificationCenter.default.publisher(for: ReplaceTaskRunner.didRunNotification)) { note in
@@ -1286,6 +1307,11 @@ struct ReplaceWizardView: View {
                 model.reloadSavedTasks()
                 model.append("替换任务：\(success ? "成功" : "未成功") · \(summary)",
                              success ? .success : .warning)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .myfilzaFileSystemAccessChanged)) { _ in
+                // 激活成功 / 提权成功：权限变了，之前那次「没权限」的扫描结果必须作废重扫
+                model.append("文件系统权限已变化：正在重新扫描 App 列表…", .info)
+                model.loadApps(force: true)
             }
             .onChange(of: model.needsActivation) { needs in
                 if needs {
@@ -1357,9 +1383,17 @@ struct ReplaceWizardView: View {
                         .foregroundColor(.secondary)
                 }
             } else if model.apps.isEmpty {
-                Text("没扫描到已安装 App。激活内核访问后再回来试试。")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("未获取到 App：请先在「设置」页点『激活内核访问』（越狱环境可直接点下面重扫）。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                    Button {
+                        model.loadApps(force: true)
+                    } label: {
+                        Label("重新扫描 App", systemImage: "arrow.clockwise")
+                            .font(.footnote)
+                    }
+                }
             } else if let selected = model.selectedApp {
                 // 选中后只留这一行 + 「更换」，不再让一屏列表占满页面
                 appRow(selected, checked: true)
@@ -1395,7 +1429,16 @@ struct ReplaceWizardView: View {
         } header: {
             Text("目标 App")
         } footer: {
-            Text("单选：点一下选中，点「更换」可取消重选。选中后下面会自动在它的数据容器里递归找同名文件。")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("单选：点一下选中，点「更换」可取消重选。选中后下面会自动在它的数据容器里递归找同名文件。")
+                Button {
+                    model.loadApps(force: true)
+                } label: {
+                    Label("重新扫描 App", systemImage: "arrow.clockwise")
+                        .font(.footnote)
+                }
+                .disabled(model.isScanningApps)
+            }
         }
     }
 

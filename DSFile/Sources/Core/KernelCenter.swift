@@ -173,6 +173,8 @@ final class KernelCenter: ObservableObject {
                 self.refresh()
                 if result.rawValue == 0 || result.rawValue == 1 {
                     DSLog.shared.info("已提权到 root（uid=0）", source: "内核")
+                    // 身份变了：环境与 App 列表缓存都要作废
+                    EnvironmentProbe.notifyFileSystemAccessChanged()
                 } else {
                     DSLog.shared.warn("提权失败，继续用沙盒逃逸 + 内核改属主的方式工作", source: "内核")
                 }
@@ -189,8 +191,8 @@ final class KernelCenter: ObservableObject {
         switch result.rawValue {
         case 0, 1:
             phase = .escaped
-            // 逃逸成功：刷新环境探测（替换任务不会自动执行，需要用户到替换页点「运行」）
-            EnvironmentProbe.refreshKernelState()
+            // 逃逸成功：清掉「激活前（没权限）」的缓存并广播，让替换页/应用管理器立刻重扫 App 列表
+            EnvironmentProbe.notifyFileSystemAccessChanged()
         case -1:
             phase = .unsupported(DSKernel.supportSummary())
         case -2:

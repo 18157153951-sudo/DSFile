@@ -348,6 +348,10 @@ struct FilesView: View {
         .refreshable {
             browser.reload()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .myfilzaFileSystemAccessChanged)) { _ in
+            // 激活成功 / 提权成功：权限变了，当前目录重新列一次（之前可能因为没权限是空的）
+            browser.reload()
+        }
     }
 
     @ViewBuilder

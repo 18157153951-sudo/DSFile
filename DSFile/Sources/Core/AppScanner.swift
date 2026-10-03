@@ -87,7 +87,19 @@ enum AppScanner {
         apps.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         cached = apps
         cachedAt = Date()
+
+        // 每次「真的扫描」（不是命中缓存）都记一行：下次报告能直接看出扫的时候有没有权限
+        let env = EnvironmentProbe.info()
+        DSLog.shared.info("AppScanner: 扫描到 \(apps.count) 个 App（文件系统访问=\(env.hasFileSystemAccess ? "是" : "否")，\(env.flavor.title)，uid \(env.uid)）",
+                          source: "AppScanner")
         return apps
+    }
+
+    /// 清缓存。**激活成功 / 提权成功 / 环境变化后必须调**：
+    /// 否则会一直用「还没权限时扫出来的空列表」，表现为「获取到 0 个 app」，去文件页逛一圈才恢复。
+    static func invalidateCache() {
+        cached = []
+        cachedAt = nil
     }
 
     static func app(withBundleId bundleId: String, force: Bool = false) -> InstalledApp? {

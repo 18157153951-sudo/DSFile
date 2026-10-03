@@ -12,6 +12,12 @@
 import Foundation
 import Darwin
 
+extension Notification.Name {
+    /// 沙盒外访问权限发生变化（内核逃逸成功 / 提权成功 / 环境重探）：
+    /// 替换页与应用管理器监听它，立刻重扫 App 列表（否则会一直显示激活前的空列表）。
+    static let myfilzaFileSystemAccessChanged = Notification.Name("myfilza.fileSystemAccessChanged")
+}
+
 // MARK: - 越狱类型
 
 enum JailbreakFlavor: String {
@@ -134,6 +140,18 @@ enum EnvironmentProbe {
     /// 内核状态变了之后刷新一次（激活成功/提权成功时调）
     static func refreshKernelState() {
         _ = info(force: true)
+    }
+
+    /// 权限状态变化后的**统一收尾**：清环境缓存 + 清 AppScanner 缓存 + 广播通知。
+    /// 调用点：KernelCenter 激活成功、提权成功。
+    /// 少了这一步，替换页/应用管理器就会一直用「激活前（没权限）扫出来的空列表」。
+    static func notifyFileSystemAccessChanged() {
+        invalidate()
+        refreshKernelState()
+        AppScanner.invalidateCache()
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .myfilzaFileSystemAccessChanged, object: nil)
+        }
     }
 
     // MARK: - 具体判定
