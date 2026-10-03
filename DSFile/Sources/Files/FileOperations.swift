@@ -86,6 +86,26 @@ enum FileOperations {
         }
     }
 
+    /// 镜像替换目录：把 dest 现有内容整棵删掉，再把 source 整棵拷进去。
+    /// **备份不在这里做**——由 RunStore 的备份会话在调用前递归 capture 整个 dest，
+    /// 这样「回滚」永远走同一套（RunStore.restore），不需要为文件夹另写一套。
+    static func replaceDirectory(source: String, dest: String) throws {
+        let parent = (dest as NSString).deletingLastPathComponent
+        try withPermissionRetry([source, dest, parent]) {
+            let fm = FileManager.default
+            if fm.fileExists(atPath: dest) {
+                // 目标整棵可能是 root 属主：先递归把属主放开再删，否则删到一半会 EPERM
+                _ = makeWritable(dest, recursive: true)
+                if !parent.isEmpty { _ = makeWritable(parent) }
+                try fm.removeItem(atPath: dest)
+            }
+            if !parent.isEmpty, !fm.fileExists(atPath: parent) {
+                try fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
+            }
+            try fm.copyItem(atPath: source, toPath: dest)
+        }
+    }
+
     static func move(_ source: String, to destination: String) throws {
         let sourceParent = (source as NSString).deletingLastPathComponent
         let destParent = (destination as NSString).deletingLastPathComponent

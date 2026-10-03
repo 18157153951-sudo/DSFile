@@ -46,7 +46,7 @@ struct ScriptRecipe: Codable {
     }
 
     struct Step: Codable {
-        /// replace / copy / move / mkdir / delete / chmod / chown / kill / note
+        /// replace / copy / move / replaceDir / mkdir / delete / chmod / chown / kill / note
         var op: String
         var source: String?
         var dest: String?

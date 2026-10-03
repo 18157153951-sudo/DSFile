@@ -34,6 +34,12 @@ typedef void (^DSPickerCancelHandler)(void);
                                    cancel:(nullable DSPickerCancelHandler)cancel
     NS_SWIFT_NAME(presentFolderPicker(completion:cancel:));
 
+/// 选择文件夹（asCopy: YES）：选完直接拿到临时目录里的整份拷贝，无需安全作用域处理。
+/// 「替换」页的文件夹模式用它导入源文件夹。
++ (void)presentFolderPickerAsCopyWithCompletion:(DSPickerCompletion)completion
+                                         cancel:(nullable DSPickerCancelHandler)cancel
+    NS_SWIFT_NAME(presentFolderPickerAsCopy(completion:cancel:));
+
 /// 系统分享面板（AirDrop / QQ / 存储到「文件」等）。传文件 URL 数组，可一次多个。
 + (void)presentShareSheetForURLs:(NSArray<NSURL *> *)urls NS_SWIFT_NAME(presentShareSheet(urls:));
 

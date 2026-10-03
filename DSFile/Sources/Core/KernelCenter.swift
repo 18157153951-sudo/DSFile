@@ -189,6 +189,9 @@ final class KernelCenter: ObservableObject {
         switch result.rawValue {
         case 0, 1:
             phase = .escaped
+            // 逃逸成功：刷新环境探测，并触发「激活成功后自动执行」的替换任务（没开就是空操作）
+            EnvironmentProbe.refreshKernelState()
+            ReplaceAutoRunner.runIfEnabledAfterActivation()
         case -1:
             phase = .unsupported(DSKernel.supportSummary())
         case -2:

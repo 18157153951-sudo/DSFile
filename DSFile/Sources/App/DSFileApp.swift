@@ -30,6 +30,8 @@ struct DSFileApp: App {
                     kernel.refresh()
                     browser.load(path: BrowserModel.defaultStartPath())
                     kernel.activateIfNeeded()
+                    // 「启动时自动执行」：没有沙盒外读写权限时会跳过并在日志里写明原因
+                    ReplaceAutoRunner.runIfEnabledOnLaunch()
                 }
         }
     }

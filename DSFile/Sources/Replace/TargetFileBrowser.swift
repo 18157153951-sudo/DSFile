@@ -14,6 +14,8 @@ struct TargetFileBrowserSheet: View {
     /// 本地待替换文件的文件名，只用于提示与标题
     let localFileName: String
     let initialTarget: String?
+    /// true = 文件夹模式：工具栏出现「选择此文件夹」，把当前所在目录当作目标
+    let pickFolders: Bool
     let onPick: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -37,10 +39,12 @@ struct TargetFileBrowserSheet: View {
     init(app: InstalledApp,
          localFileName: String,
          initialTarget: String?,
+         pickFolders: Bool = false,
          onPick: @escaping (String) -> Void) {
         self.app = app
         self.localFileName = localFileName
         self.initialTarget = initialTarget
+        self.pickFolders = pickFolders
         self.onPick = onPick
 
         // 初始根目录：优先跟着已绑定的路径走
@@ -63,6 +67,10 @@ struct TargetFileBrowserSheet: View {
                         Text("当前根目录：")
                         Text(rootPath.isEmpty ? "（没有这个容器）" : rootPath)
                             .font(.system(.caption2, design: .monospaced))
+                        if pickFolders {
+                            Text("进到想替换的那个文件夹里，再点右上角「选择此文件夹」。")
+                                .foregroundColor(.orange)
+                        }
                     }
                     .font(.footnote)
                 }
@@ -154,11 +162,20 @@ struct TargetFileBrowserSheet: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("选择目标文件")
+            .navigationTitle(pickFolders ? "选择目标文件夹" : "选择目标文件")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
+                }
+                if pickFolders {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("选择此文件夹") {
+                            onPick(currentPath)
+                            dismiss()
+                        }
+                        .disabled(!hasFileAccess || currentPath.isEmpty)
+                    }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
@@ -268,6 +285,8 @@ struct TargetFileBrowserSheet: View {
             reload()
             return
         }
+        // 文件夹模式只选目录：点文件不绑定（避免误把文件当文件夹目标）
+        if pickFolders { return }
         onPick(item.path)
         dismiss()
     }

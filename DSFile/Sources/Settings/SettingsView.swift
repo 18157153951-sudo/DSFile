@@ -43,11 +43,19 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.1"
+    private static let appVersion = "0.3.2"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.2", date: "2026-10-03", items: [
+            "「替换」页新增文件夹模式：选一个本地文件夹，整体镜像替换目标 App 里的某个文件夹（目标里源没有的旧文件会被移除）",
+            "文件夹模式强制开启备份：替换前把整个目标文件夹递归备份，回滚走同一套「一键回滚」",
+            "目标目录浏览器新增「选择此文件夹」，文件夹模式下用它挑目标文件夹",
+            "新增「自动化」：可以设置「启动时自动执行」与「激活成功后自动执行」，也可以点「现在运行一次」",
+            "自动执行一律强制备份、写运行记录、可一键回滚；没有沙盒外读写权限时会跳过并写明原因，不静默",
+            "绑定改动会自动保存成自动任务（Documents/AutoTasks/auto.json），下次打开还在"
+        ]),
         ChangeEntry(version: "0.3.1", date: "2026-10-03", items: [
             "「替换」页把「执行前自动备份」做成可见开关，关掉会明确提示没有回滚兜底",
             "每次替换后给结果卡片，并新增「最近的替换」：逐条可回滚 / 看日志 / 删记录",

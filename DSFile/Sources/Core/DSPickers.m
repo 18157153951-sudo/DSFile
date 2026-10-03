@@ -122,6 +122,23 @@ static DSPickerCoordinator *gCurrent = nil;
     [top presentViewController:picker animated:YES completion:nil];
 }
 
++ (void)presentFolderPickerAsCopyWithCompletion:(DSPickerCompletion)completion cancel:(DSPickerCancelHandler)cancel
+{
+    UIViewController *top = [self topViewController];
+    if (!top) { if (cancel) cancel(); return; }
+
+    UIDocumentPickerViewController *picker =
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeFolder ] asCopy:YES];
+    picker.allowsMultipleSelection = NO;
+
+    DSPickerCoordinator *coordinator = [[DSPickerCoordinator alloc] initWithPick:completion cancel:cancel];
+    [DSPickerCoordinator setCurrentCoordinator:coordinator];
+    picker.delegate = coordinator;
+    picker.modalPresentationStyle = UIModalPresentationFormSheet;
+
+    [top presentViewController:picker animated:YES completion:nil];
+}
+
 + (void)presentShareSheetForURLs:(NSArray<NSURL *> *)urls
 {
     if (urls.count == 0) return;
