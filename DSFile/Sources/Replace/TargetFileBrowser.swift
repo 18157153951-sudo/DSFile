@@ -168,8 +168,11 @@ struct TargetFileBrowserSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
                 }
-                if pickFolders {
-                    ToolbarItem(placement: .confirmationAction) {
+                // 注意：条件必须写在 ToolbarItem 的「内容」里。
+                // 直接对 ToolbarItem 本身用 if 会走 ToolbarContentBuilder 的 buildIf（iOS 16+），
+                // 而本 App 最低支持 iOS 15。
+                ToolbarItem(placement: .confirmationAction) {
+                    if pickFolders {
                         Button("选择此文件夹") {
                             onPick(currentPath)
                             dismiss()
