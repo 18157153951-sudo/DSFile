@@ -40,11 +40,17 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "暗剑文件"
-    private static let appVersion = "0.1.0"
+    private static let appVersion = "0.2.0"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.2.0", date: "2026-10-03", items: [
+            "新增「替换」页：选目标 App，把本地文件加进来，按文件名自动在它的数据容器里找到同名文件，一键替换",
+            "同名多处或找不到时，点那一行从候选里选，或手填完整路径",
+            "每次替换前自动整份备份，替换完当场可一键回滚，「记录」页也能回滚",
+            "替换前先检查内核访问：没激活就明确提示去设置页激活，不会静默失败"
+        ]),
         ChangeEntry(version: "0.1.0", date: "2026-10-03", items: [
             "全新文件管理器：整机文件浏览、文本编辑、十六进制查看、权限与属主修改",
             "脚本页：导入自己准备好的配方（JSON）或 shell 脚本，一键替换目标 App 里指定的文件",
