@@ -49,6 +49,8 @@ static NSString *g3105LastStage  = @"未开始";
 
 /// 前置声明：下面的「纯用户态令牌」实现会先调用它（定义在文件稍后）
 static BOOL ds3105_probe_write(void);
+/// 前置声明：纯用户态令牌路径要先报「bad_query 缺哪些符号」（定义在文件稍后）
+static NSString *ds3105_badquery_missing_symbols(void);
 
 BOOL DS3105KernelAvailable(void) { return YES; }
 BOOL DS3105KernelIsReady(void)   { return g3105Ready; }
