@@ -1307,13 +1307,7 @@ struct ReplaceWizardView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        switch model.mode {
-                        case .files: model.importFiles()
-                        case .folders: model.importFolders()
-                        case .bundle: model.importBundleFiles()
-                        }
-                    } label: {
+                    Button(action: plusAction) {
                         Image(systemName: "plus")
                     }
                 }
@@ -1531,6 +1525,20 @@ struct ReplaceWizardView: View {
     }
 
     // MARK: 模式
+
+    /// 工具栏「+」：按当前模式走对应的导入入口。
+    /// 单独抽成方法是为了给 SwiftUI 的 body 减负——整段 body 表达式过于复杂时，
+    /// 编译器会报 "unable to type-check this expression in reasonable time"。
+    private func plusAction() {
+        switch model.mode {
+        case .files:
+            model.importFiles()
+        case .folders:
+            model.importFolders()
+        case .bundle:
+            model.importBundleFiles()
+        }
+    }
 
     private var modeSection: some View {
         Section {
