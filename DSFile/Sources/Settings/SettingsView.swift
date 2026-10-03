@@ -43,11 +43,17 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.3.6"
+    private static let appVersion = "0.3.7"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.7", date: "2026-10-03", items: [
+            "新增「目标优先」绑定：在文件模式与包体(.app)模式里，先点「添加目标文件」在目标 App 目录里挑出**要替换掉的那个文件**（支持多选），App 会自动在本机找同名文件配上；同名多处让你选，一个都没有就直接弹本机选择器让你挑",
+            "这样绑定的目标路径会被锁定，自动匹配不会再把它改掉；点那一行 = 更换本地替换文件，长按可重新选目标路径 / 手填 / 清除绑定",
+            "原来的「本机优先」流程保留为次按钮：「添加本机文件（按名自动匹配目标）」",
+            "按钮名称统一：打开目标目录的叫「添加目标文件」，打开本机选择器的叫「添加本机文件」"
+        ]),
         ChangeEntry(version: "0.3.6", date: "2026-10-03", items: [
             "修复：点「添加源文件夹」会弹出「folder import is not supported, use asCopy:false」并失败——Apple 不允许用 asCopy 选文件夹。现在所有选择器一律 asCopy:NO，改由 App 自己用安全作用域把内容拷进沙盒（iCloud 未下载的文件会先协调下载），失败会给出明确原因",
             "修复：导入文件 / 导入脚本 / 添加 payload 也一并换成新的导入通道，选中文件夹不会再抛异常",

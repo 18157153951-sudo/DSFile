@@ -18,6 +18,9 @@ struct TargetFileBrowserSheet: View {
     let pickFolders: Bool
     /// 非 nil = 根目录锁定在这个路径（包体(.app)模式用它把根固定为 .app，不显示根目录切换）
     let lockedRoot: String?
+    /// true = 多选：右上角出现「选择」，勾选多个文件后一次性回调（目标优先绑定用）
+    let allowsMultipleSelection: Bool
+    let onPickMany: (([String]) -> Void)?
     let onPick: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -29,6 +32,9 @@ struct TargetFileBrowserSheet: View {
     @State private var isLoading = false
     @State private var showHidden = false
     @State private var hasFileAccess = true
+    /// 多选模式：是否处于勾选状态、已勾选的路径
+    @State private var isSelecting = false
+    @State private var selection: Set<String> = []
 
     enum RootMode: String, CaseIterable, Identifiable {
         case data
@@ -43,12 +49,16 @@ struct TargetFileBrowserSheet: View {
          initialTarget: String?,
          pickFolders: Bool = false,
          lockedRoot: String? = nil,
+         allowsMultipleSelection: Bool = false,
+         onPickMany: (([String]) -> Void)? = nil,
          onPick: @escaping (String) -> Void) {
         self.app = app
         self.localFileName = localFileName
         self.initialTarget = initialTarget
         self.pickFolders = pickFolders
         self.lockedRoot = lockedRoot
+        self.allowsMultipleSelection = allowsMultipleSelection
+        self.onPickMany = onPickMany
         self.onPick = onPick
 
         // 初始根目录：优先跟着已绑定的路径走；锁定时固定为 .bundle 视图
@@ -171,6 +181,19 @@ struct TargetFileBrowserSheet: View {
                             .buttonStyle(.plain)
                         }
                     }
+
+                    if allowsMultipleSelection && isSelecting {
+                        Button {
+                            let picked = items.filter { selection.contains($0.path) }.map { $0.path }
+                            guard !picked.isEmpty else { return }
+                            onPickMany?(picked)
+                            dismiss()
+                        } label: {
+                            Label("添加已选 \(selection.count) 个目标文件", systemImage: "checkmark.circle.fill")
+                                .font(.subheadline)
+                        }
+                        .disabled(selection.isEmpty)
+                    }
                 }
             }
             .listStyle(.insetGrouped)
@@ -190,6 +213,12 @@ struct TargetFileBrowserSheet: View {
                             dismiss()
                         }
                         .disabled(!hasFileAccess || currentPath.isEmpty)
+                    } else if allowsMultipleSelection {
+                        Button(isSelecting ? "完成" : "选择") {
+                            isSelecting.toggle()
+                            if !isSelecting { selection.removeAll() }
+                        }
+                        .disabled(!hasFileAccess)
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -237,7 +266,11 @@ struct TargetFileBrowserSheet: View {
 
             Spacer()
 
-            if !item.isDirectory && item.name == localFileName {
+            if allowsMultipleSelection && isSelecting && !item.isDirectory {
+                Image(systemName: selection.contains(item.path) ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundColor(selection.contains(item.path) ? .accentColor : .secondary)
+            } else if !item.isDirectory && item.name == localFileName {
                 Text("同名")
                     .font(.caption2)
                     .foregroundColor(.green)
@@ -313,6 +346,16 @@ struct TargetFileBrowserSheet: View {
         }
         // 文件夹模式只选目录：点文件不绑定（避免误把文件当文件夹目标）
         if pickFolders { return }
+
+        // 多选模式：勾选状态下点文件 = 切换勾选；不在勾选状态 = 直接选它（和单选一样快）
+        if allowsMultipleSelection && isSelecting {
+            if selection.contains(item.path) {
+                selection.remove(item.path)
+            } else {
+                selection.insert(item.path)
+            }
+            return
+        }
         onPick(item.path)
         dismiss()
     }

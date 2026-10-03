@@ -35,15 +35,21 @@ final class ReplaceWizardModel: ObservableObject {
 
     struct WizardFile: Identifiable, Hashable {
         let id = UUID()
-        let localPath: String
+        var localPath: String
         let name: String
-        let sizeText: String
+        var sizeText: String
         /// 只读转储用不到，但保留字段方便以后扩展
         var targetPath: String?
         var candidates: [String] = []
         var state: FileState = .notFound
+        /// true = 这一行的「目标路径」是用户在目标目录里亲手挑的（目标优先绑定）：
+        /// 自动匹配不许覆盖它；点这一行的默认动作变成「挑/换本地替换文件」。
+        var targetLocked: Bool = false
 
         var hintText: String {
+            if localPath.isEmpty {
+                return "还没选本地替换文件：点这一行挑一个"
+            }
             if let target = targetPath, !target.isEmpty {
                 return "→ \(target)"
             }
@@ -324,6 +330,155 @@ final class ReplaceWizardModel: ObservableObject {
         return candidate
     }
 
+    // MARK: - 目标优先绑定（先浏览目标目录挑文件，再配本地替换源）
+
+    /// 「目标优先」流程里还没配到本地文件的那一条
+    struct UnmatchedTarget: Identifiable, Hashable {
+        let id: UUID
+        let target: String
+    }
+
+    /// 在本机 Documents 下按文件名找同名文件（递归；跳过备份/记录/日志等系统目录；最多 12 个）
+    func findLocalMatches(name: String) -> [String] {
+        guard !name.isEmpty else { return [] }
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return [] }
+        // 这些是 App 自己的系统目录，里面的同名文件不算「用户的替换源」
+        let skip: Set<String> = ["Backups", "Runs", "Logs", "AutoTasks", "ImportInbox", "Adapted", "Artifacts"]
+        var results: [String] = []
+        let keys: [URLResourceKey] = [.isDirectoryKey]
+        if let enumerator = fm.enumerator(at: docs,
+                                          includingPropertiesForKeys: keys,
+                                          options: [.skipsHiddenFiles],
+                                          errorHandler: { _, _ in true }) {
+            var visited = 0
+            for case let url as URL in enumerator {
+                visited += 1
+                if visited > 200_000 || results.count >= 12 { break }
+                let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                if isDir && skip.contains(url.lastPathComponent) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                guard url.lastPathComponent == name, !isDir else { continue }
+                results.append(url.path)
+            }
+        }
+        return results
+    }
+
+    /// 目标优先：把用户挑好的目标路径变成绑定。
+    /// 本机同名唯一 → 直接配上；多处 → 记候选让用户选；一个都没有 → 返回给界面去弹本机选择器。
+    @discardableResult
+    func addTargets(_ targetPaths: [String], inBundle: Bool) -> [UnmatchedTarget] {
+        var unmatched: [UnmatchedTarget] = []
+        var added = 0
+        for target in targetPaths {
+            let name = (target as NSString).lastPathComponent
+            guard !name.isEmpty else { continue }
+            let matches = findLocalMatches(name: name)
+            let row: WizardFile
+            switch matches.count {
+            case 0:
+                row = WizardFile(localPath: "",
+                                 name: name,
+                                 sizeText: "",
+                                 targetPath: target,
+                                 candidates: [],
+                                 state: .notFound,
+                                 targetLocked: true)
+                unmatched.append(UnmatchedTarget(id: row.id, target: target))
+            case 1:
+                row = WizardFile(localPath: matches[0],
+                                 name: name,
+                                 sizeText: Self.sizeText(FileOperations.fileSize(matches[0])),
+                                 targetPath: target,
+                                 candidates: [],
+                                 state: .manual,
+                                 targetLocked: true)
+            default:
+                row = WizardFile(localPath: matches[0],
+                                 name: name,
+                                 sizeText: Self.sizeText(FileOperations.fileSize(matches[0])),
+                                 targetPath: target,
+                                 candidates: matches,
+                                 state: .ambiguous,
+                                 targetLocked: true)
+            }
+            if inBundle { bundleFiles.append(row) } else { files.append(row) }
+            added += 1
+        }
+        if added > 0 {
+            markDirty()
+            append("已按目标目录加入 \(added) 条：本机同名唯一 \(added - unmatched.count) 条，需要你挑本地文件 \(unmatched.count) 条",
+                   unmatched.isEmpty ? .success : .warning)
+        }
+        return unmatched
+    }
+
+    /// 目标优先：给某一行的目标配上本地文件（用户从本机选择器挑完、或从同名候选里选）
+    func bindLocalFile(_ localPath: String, to id: UUID, inBundle: Bool) {
+        if inBundle {
+            guard let index = bundleFiles.firstIndex(where: { $0.id == id }) else { return }
+            bundleFiles[index].localPath = localPath
+            bundleFiles[index].sizeText = Self.sizeText(FileOperations.fileSize(localPath))
+            bundleFiles[index].state = .manual
+            bundleFiles[index].candidates = []
+        } else {
+            guard let index = files.firstIndex(where: { $0.id == id }) else { return }
+            files[index].localPath = localPath
+            files[index].sizeText = Self.sizeText(FileOperations.fileSize(localPath))
+            files[index].state = .manual
+            files[index].candidates = []
+        }
+        append("已绑定本地替换文件：\((localPath as NSString).lastPathComponent)", .success)
+        markDirty()
+    }
+
+    /// 目标优先：为某一行挑本地替换文件（打开本机选择器 → 拷进沙盒 → 绑定到该行的目标路径）
+    func pickLocalFile(for id: UUID, inBundle: Bool) {
+        withPickerSafety("选择本地替换文件") {
+            DSPickers.presentOpenPickerCopying(into: URL(fileURLWithPath: self.inboxDirectory),
+                                               utis: nil,
+                                           multiple: false,
+                                         completion: { copied, error in
+                if let error = error {
+                    self.append("选择本地文件失败：\(error.localizedDescription)", .error)
+                }
+                guard let first = copied.first else { return }
+                self.bindLocalFile(first.path, to: id, inBundle: inBundle)
+            }, cancel: nil)
+        }
+    }
+
+    /// 目标优先：为「还没配上本地文件」的那些目标批量挑本地文件（按文件名一一配对）
+    func pickLocalFiles(for targets: [UnmatchedTarget], inBundle: Bool) {
+        guard !targets.isEmpty else { return }
+        withPickerSafety("选择本地替换文件") {
+            DSPickers.presentOpenPickerCopying(into: URL(fileURLWithPath: self.inboxDirectory),
+                                               utis: nil,
+                                           multiple: true,
+                                         completion: { copied, error in
+                if let error = error {
+                    self.append("选择本地文件失败：\(error.localizedDescription)", .error)
+                }
+                guard !copied.isEmpty else { return }
+                var pending = targets
+                for url in copied {
+                    let name = url.lastPathComponent
+                    guard let index = pending.firstIndex(where: {
+                        ($0.target as NSString).lastPathComponent == name
+                    }) else { continue }
+                    let match = pending.remove(at: index)
+                    self.bindLocalFile(url.path, to: match.id, inBundle: inBundle)
+                }
+                if !pending.isEmpty {
+                    self.append("还有 \(pending.count) 个目标没配上本地文件：点对应那一行单独挑", .warning)
+                }
+            }, cancel: nil)
+        }
+    }
+
     // MARK: - 自动匹配（一次遍历，按文件名建索引）
 
     func rematchAll() {
@@ -370,6 +525,8 @@ final class ReplaceWizardModel: ObservableObject {
                 guard self.matchToken == token else { return }
                 var unique = 0, ambiguous = 0, missing = 0
                 for position in self.files.indices {
+                    // 目标优先绑定过的行：目标路径是用户亲手挑的，不许被自动匹配覆盖
+                    if self.files[position].targetLocked { continue }
                     // 手动指定过的条目不动
                     if self.files[position].state == .manual, let path = self.files[position].targetPath, !path.isEmpty {
                         continue
@@ -505,6 +662,8 @@ final class ReplaceWizardModel: ObservableObject {
                 guard self.matchToken == token else { return }
                 var unique = 0, ambiguous = 0, missing = 0
                 for position in self.bundleFiles.indices {
+                    // 目标优先绑定过的行：目标路径是用户亲手挑的，不许被自动匹配覆盖
+                    if self.bundleFiles[position].targetLocked { continue }
                     if self.bundleFiles[position].state == .manual,
                        let path = self.bundleFiles[position].targetPath, !path.isEmpty {
                         continue
@@ -756,6 +915,8 @@ final class ReplaceWizardModel: ObservableObject {
                                mode: mode,
                                files: sourceFiles.compactMap { file in
                                    guard let target = file.targetPath, !target.isEmpty else { return nil }
+                                   // 目标优先绑定但还没配本地文件的条目不进配方（避免空 source）
+                                   guard !file.localPath.isEmpty else { return nil }
                                    return ReplaceFileBinding(localPath: file.localPath,
                                                              name: file.name,
                                                              targetPath: target)
@@ -1097,6 +1258,13 @@ struct ReplaceWizardView: View {
     @State private var bundleManualSheet: ReplaceWizardModel.WizardFile?
     @State private var bundleBrowserRequest: BrowserRequest?
     @State private var bundleFolderBrowserRequest: FolderBrowserRequest?
+    /// 目标优先：正在浏览哪个 App 的目标目录（多选，先挑目标文件）
+    @State private var targetFirstRequest: TargetFirstRequest?
+    /// 目标优先：某一行有多个同名本地候选，让用户挑一个
+    @State private var localCandidateSheet: ReplaceWizardModel.WizardFile?
+    @State private var localCandidateInBundle = false
+    /// 目标优先：某一行还没配上本地文件，待弹本机文件选择器
+    @State private var pendingLocalPick: PendingLocalPick?
     @State private var appFilter: String = ""
     @State private var activationAlert = false
     @State private var rollbackConfirm = false
@@ -1212,6 +1380,39 @@ struct ReplaceWizardView: View {
                                        lockedRoot: request.app.bundlePath) { path in
                     model.setBundleFolderTarget(path: path)
                     bundleFolderBrowserRequest = nil
+                }
+            }
+            .sheet(item: $targetFirstRequest) { request in
+                TargetFileBrowserSheet(app: request.app,
+                                       localFileName: "",
+                                       initialTarget: nil,
+                                       lockedRoot: request.inBundle ? request.app.bundlePath : nil,
+                                       allowsMultipleSelection: true,
+                                       onPickMany: { paths in
+                                           let unmatched = model.addTargets(paths, inBundle: request.inBundle)
+                                           targetFirstRequest = nil
+                                           if let first = unmatched.first {
+                                               pendingLocalPick = PendingLocalPick(rowID: first.id,
+                                                                                  target: first.target,
+                                                                                  inBundle: request.inBundle)
+                                           }
+                                       },
+                                       onPick: { _ in })
+            }
+            .sheet(item: $localCandidateSheet) { file in
+                CandidateTargetSheet(file: file, kind: .local) { path in
+                    model.bindLocalFile(path, to: file.id, inBundle: localCandidateInBundle)
+                    localCandidateSheet = nil
+                }
+            }
+            .onChange(of: pendingLocalPick) { pick in
+                guard let pick = pick else { return }
+                pendingLocalPick = nil
+                // 等 sheet 收完再弹本机选择器，避免两个呈现打架
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    model.pickLocalFiles(for: [ReplaceWizardModel.UnmatchedTarget(id: pick.rowID,
+                                                                                 target: pick.target)],
+                                         inBundle: pick.inBundle)
                 }
             }
             .alert("保存为自动化任务", isPresented: $namingTask) {
@@ -1490,6 +1691,11 @@ struct ReplaceWizardView: View {
 
             ForEach(model.files) { file in
                 Button {
+                    if file.targetLocked {
+                        // 目标优先绑定过的行：点一下 = 挑/换本地替换文件
+                        handleTargetLockedRow(file, inBundle: false)
+                        return
+                    }
                     switch file.state {
                     case .ambiguous:
                         candidateSheet = file
@@ -1502,10 +1708,17 @@ struct ReplaceWizardView: View {
                 }
                 .buttonStyle(.plain)
                 .contextMenu {
+                    if file.targetLocked {
+                        Button {
+                            model.pickLocalFile(for: file.id, inBundle: false)
+                        } label: {
+                            Label("更换本地替换文件", systemImage: "doc.badge.plus")
+                        }
+                    }
                     Button {
                         openBrowser(for: file)
                     } label: {
-                        Label("浏览目标 App 目录", systemImage: "folder")
+                        Label("重新选择目标路径", systemImage: "folder")
                     }
                     Button {
                         manualSheet = file
@@ -1524,14 +1737,20 @@ struct ReplaceWizardView: View {
             }
 
             Button {
+                openTargetFirst(inBundle: false)
+            } label: {
+                Label("添加目标文件（浏览数据容器）", systemImage: "folder.badge.plus")
+            }
+
+            Button {
                 model.importFiles()
             } label: {
-                Label("添加本地文件…", systemImage: "square.and.arrow.down")
+                Label("添加本机文件（按名自动匹配目标）", systemImage: "square.and.arrow.down")
             }
         } header: {
-            Text("替换文件（自动匹配 / 浏览目录 / 手填）")
+            Text("替换文件（目标优先 / 本机优先）")
         } footer: {
-            Text("唯一同名 → 自动绑定；同名多处 → 点那一行从候选里选；没找到 → 点那一行打开目标 App 目录浏览，或长按选「手填完整路径」。左滑从列表移除（文件本体留在 ReplaceInbox）。")
+            Text("目标优先：先点「添加目标文件」在目标 App 数据容器里挑出要替换掉的文件，App 会自动在本机找同名文件配上（同名多处会让你选，一个都没有会弹本机选择器）；这样绑定的目标路径会被**锁定**，不会被自动匹配改掉。本机优先：点「添加本机文件」，再按文件名自动匹配目标。左滑从列表移除（文件本体留在 ReplaceInbox）。")
         }
     }
 
@@ -1542,6 +1761,25 @@ struct ReplaceWizardView: View {
             return
         }
         browserRequest = BrowserRequest(file: file, app: app)
+    }
+
+    /// 目标优先：先浏览目标目录，挑出「要被替换掉的那个文件」
+    private func openTargetFirst(inBundle: Bool) {
+        guard let app = model.selectedApp else {
+            model.append("请先在上面选一个目标 App，再浏览它的目录", .error)
+            return
+        }
+        targetFirstRequest = TargetFirstRequest(app: app, inBundle: inBundle)
+    }
+
+    /// 目标优先的行：点一下 = 挑/换本地替换文件（有多个同名候选就先让用户选）
+    private func handleTargetLockedRow(_ file: ReplaceWizardModel.WizardFile, inBundle: Bool) {
+        if !file.candidates.isEmpty {
+            localCandidateInBundle = inBundle
+            localCandidateSheet = file
+            return
+        }
+        model.pickLocalFile(for: file.id, inBundle: inBundle)
     }
 
     // MARK: 文件夹模式
@@ -1680,6 +1918,11 @@ struct ReplaceWizardView: View {
 
             ForEach(model.bundleFiles) { file in
                 Button {
+                    if file.targetLocked {
+                        // 目标优先绑定过的行：点一下 = 挑/换本地替换文件
+                        handleTargetLockedRow(file, inBundle: true)
+                        return
+                    }
                     switch file.state {
                     case .ambiguous:
                         bundleCandidateSheet = file
@@ -1691,10 +1934,17 @@ struct ReplaceWizardView: View {
                 }
                 .buttonStyle(.plain)
                 .contextMenu {
+                    if file.targetLocked {
+                        Button {
+                            model.pickLocalFile(for: file.id, inBundle: true)
+                        } label: {
+                            Label("更换本地替换文件", systemImage: "doc.badge.plus")
+                        }
+                    }
                     Button {
                         openBundleBrowser(for: file)
                     } label: {
-                        Label("浏览 .app 目录", systemImage: "folder")
+                        Label("重新选择目标路径", systemImage: "folder")
                     }
                     Button {
                         bundleManualSheet = file
@@ -1715,14 +1965,20 @@ struct ReplaceWizardView: View {
             }
 
             Button {
+                openTargetFirst(inBundle: true)
+            } label: {
+                Label("添加目标文件（浏览 .app）", systemImage: "folder.badge.plus")
+            }
+
+            Button {
                 model.importBundleFiles()
             } label: {
-                Label("添加文件…", systemImage: "doc.badge.plus")
+                Label("添加本机文件（按名自动匹配 .app 内目标）", systemImage: "doc.badge.plus")
             }
         } header: {
             Text("包体(.app) 内容")
         } footer: {
-            Text("目标固定为所选 App 的包体。\(model.bundleSemantics == .mirror ? "镜像替换会把 .app 里你这份没有的文件删掉。" : "合并只覆盖同名文件，其余保持不动（改 .app 更安全）。")执行前强制整棵递归备份。⚠️ 改自签 App 的包体会破坏签名校验，可能导致它直接打不开；动手前确认你有重装手段（回滚需要备份完好）。")
+            Text("目标固定为所选 App 的包体。**目标优先**：点「添加目标文件（浏览 .app）」在 .app 里挑出要替换掉的文件，App 会自动在本机找同名文件配上（多处会让你选，一个都没有会弹本机选择器），并把目标路径锁定；**本机优先**：点「添加本机文件」，再按文件名自动匹配 .app 内的目标。\(model.bundleSemantics == .mirror ? "镜像替换会把 .app 里你这份没有的文件删掉。" : "合并只覆盖同名文件，其余保持不动（改 .app 更安全）。")执行前强制整棵递归备份。⚠️ 改自签 App 的包体会破坏签名校验，可能导致它直接打不开；动手前确认你有重装手段（回滚需要备份完好）。")
         }
     }
 
@@ -2159,8 +2415,23 @@ private struct FolderRow: View {
 // MARK: - 选择候选目标
 
 private struct CandidateTargetSheet: View {
+    /// 选什么：目标路径（本机优先流程）还是本地替换文件（目标优先流程）
+    enum Kind {
+        case target
+        case local
+    }
+
     let file: ReplaceWizardModel.WizardFile
+    let kind: Kind
     let onPick: (String) -> Void
+
+    init(file: ReplaceWizardModel.WizardFile,
+         kind: Kind = .target,
+         onPick: @escaping (String) -> Void) {
+        self.file = file
+        self.kind = kind
+        self.onPick = onPick
+    }
 
     @Environment(\.dismiss) private var dismiss
 
@@ -2179,7 +2450,9 @@ private struct CandidateTargetSheet: View {
                         }
                     }
                 } footer: {
-                    Text("这些都在目标 App 的数据容器里、且文件名和本地文件相同。选一个作为替换目标。")
+                    Text(kind == .local
+                         ? "这些是本机 Documents 里的同名文件。选一个作为本地替换源——它会覆盖上面已经锁定的目标路径。"
+                         : "这些都在目标 App 的数据容器里、且文件名和本地文件相同。选一个作为替换目标。")
                 }
             }
             .listStyle(.insetGrouped)
@@ -2268,6 +2541,22 @@ struct FolderBrowserRequest: Identifiable {
     let id = UUID()
     let folder: ReplaceWizardModel.WizardFolder
     let app: InstalledApp
+}
+
+/// 目标优先：浏览目标目录并多选文件（先挑「要被替换掉的那个文件」，再配本地替换源）
+struct TargetFirstRequest: Identifiable {
+    let id = UUID()
+    let app: InstalledApp
+    /// true = 浏览包体(.app)；false = 浏览数据容器
+    let inBundle: Bool
+}
+
+/// 目标优先：某一条目标还没配上本地文件，等本机选择器选完绑上去
+struct PendingLocalPick: Identifiable {
+    let id = UUID()
+    let rowID: UUID
+    let target: String
+    let inBundle: Bool
 }
 
 // MARK: - 单条记录的日志
