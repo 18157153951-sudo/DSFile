@@ -11,6 +11,7 @@
 
 #import "DSMHAKernel.h"
 #import "DSMCMBridge.h"
+#import "DSSignatureInfo.h"
 
 #import <unistd.h>
 #import <fcntl.h>
@@ -112,20 +113,24 @@ int DSMHAKernelActivate(NSString **detail)
             *detail = [NSString stringWithFormat:
                        @"当前 bundle id 是 %@，不是 %@。MHA 路径要求：签名时的 Bundle ID 与 "
                         "CodeDirectory identifier 都是 com.apple.mobile.MobileHouseArrest"
-                        "（用 myfilza-mha.ipa，或在 eSign 里把 Bundle ID 指定为该值，且不要让它被改写）。",
-                       NSBundle.mainBundle.bundleIdentifier ?: @"(nil)", DSMHABundleIdentifier];
+                        "（用 myfilza-mha.ipa，或在 eSign 里把 Bundle ID 指定为该值，且不要让它被改写）。\n%@",
+                       NSBundle.mainBundle.bundleIdentifier ?: @"(nil)", DSMHABundleIdentifier,
+                       DSSignatureDiagnosticReport()];
         }
         return 1020;
     }
 
     if (!DSMCMBridgeAvailable()) {
         mha_stage(@"MCM 桥不可用");
-        if (detail) *detail = [NSString stringWithFormat:@"ContainerManager 桥不可用，缺符号：%@",
-                               DSMCMMissingSymbols()];
+        if (detail) *detail = [NSString stringWithFormat:@"ContainerManager 桥不可用，缺符号：%@\n%@",
+                               DSMCMMissingSymbols(), DSSignatureDiagnosticReport()];
         return 1021;
     }
 
     NSMutableString *report = [NSMutableString string];
+    // 签名标识诊断放在最前面：MCM 的授权键是签名里的 CodeDirectory identifier，
+    // 它是不是 MHA，直接决定了下面"能枚举到几个容器""写探针能不能过"。
+    [report appendString:DSSignatureDiagnosticReport()];
     [report appendFormat:@"自身 bundle id = %@；MCM 桥可用 ✓\n", NSBundle.mainBundle.bundleIdentifier];
 
     // ---- 枚举：仅元数据、不申请扩展（这样"没权限"也能列出 App）----
@@ -198,12 +203,22 @@ int DSMHAKernelActivate(NSString **detail)
 
     if (!writeOK && !readOK) {
         mha_stage(@"探针全部失败");
+        // 经验判据：只拿到自己一个数据容器 + 沙盒外写失败 ⇒ 身份没生效（签名 identifier 不是 MHA）。
+        // 依据：上游 MobileHouseArrest-PoC 原文 —— MCM 把调用方的 CodeDirectory identifier 当授权键。
+        if (okData <= 1) {
+            [report appendString:
+                @"结论（经验判据）：只能枚举到 1 个 App 数据容器（=自己）+ 沙盒外写探针失败 —— "
+                @"这正是「签名 identifier 不是 MHA」的指纹（MCM 只给你自己的容器，特权 profile 未下发）。"
+                @"请把签名工具里的 Bundle ID / Signing Identifier 设为 com.apple.mobile.MobileHouseArrest，"
+                @"并确认没有使用「自动生成 Bundle ID」。\n"];
+        }
         if (detail) *detail = report;
         return 1023;
     }
 
     mha_stage(@"完成");
-    [report appendString:@"MHA 路径完成：容器租约已激活并持有，普通文件 API 可直接读写这些容器。"];
+    [report appendString:@"MHA 路径完成：容器租约已激活并持有，普通文件 API 可直接读写这些容器。\n"];
+    [report appendString:DSSignatureSummaryLine()];
     if (detail) *detail = report;
     return 0;
 }

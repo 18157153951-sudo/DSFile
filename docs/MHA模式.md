@@ -114,3 +114,28 @@ PoC 原文第一句：**“MobileContainerManager trusted the caller's CodeDirec
 - 所有容器 `activate` 全失败 → 多半是 **identifier 不匹配**；
 - 写 `/var/mobile` 探针失败 → 多半是**特权 profile 没下来**（签名/安装方式问题）；
 - 提示 `MCM 桥不可用` → 日志会直接列出缺哪个私有符号。
+
+## 9. 怎么判断签名对不对（看日志里的「签名 identifier」）
+
+0.7.3 起，App 会在**启动时**与 **MHA 路径开始时**各打一次签名诊断，格式固定，方便原样回报：
+
+```text
+[MHA 诊断] bundle id = com.apple.mobile.MobileHouseArrest；签名 identifier = <值>（期望 com.apple.mobile.MobileHouseArrest）→ 匹配 ✓ / 不匹配 ✗ / 无法判断
+[MHA 诊断] TeamIdentifier = <值>；application-identifier = <值>
+[MHA 诊断] csops 原始值：signingID = <值>；identity = <值>
+```
+
+怎么读：
+
+| 日志现象 | 含义 | 怎么办 |
+| --- | --- | --- |
+| `签名 identifier = com.apple.mobile.MobileHouseArrest → 匹配 ✓` | 签名身份对了 | 若仍看不到别的容器，继续看下面的枚举/租约/探针行 |
+| `签名 identifier = <TeamID>.<bundleid> → 不匹配 ✗` | 用的是 TeamID 前缀式签名（免费/个人 Apple ID，或工具自动生成） | 换付费/企业证书；把 Bundle ID 设为 `com.apple.mobile.MobileHouseArrest`，**不要用「自动生成」** |
+| `→ 无法判断`（读不到值） | 两个读法都没拿到值 | 用**经验判据**：`枚举 class 2 = 1 个标识`（只有自己）+ `写探针失败` ⇒ 身份没生效 |
+| `枚举 class 2：N 个标识`（N 明显大于 1） | 身份生效了（MCM 愿意给你别人的容器） | 正常，继续看租约与探针 |
+| `写探针：/var/mobile/... (errno=1) → 失败` | 特权沙盒 profile 没下发 | 多半还是签名 identifier 的问题；也检查有没有用「自动生成 Bundle ID」 |
+| `MCM 桥不可用，缺符号：…` | 系统里缺某个私有符号 | 把这一行原样回报即可 |
+
+**真机实测（0.7.2，iPhone13,4 / iOS 18.5）**：`枚举 class 2 = 1 个标识`（只有自己）＋ `激活租约 6/6 成功` ＋ `写探针失败 (errno=1)` —— 与「签名 identifier 不是 MHA」完全吻合：**租约机制本身是通的**（能拿到自己的容器），但 MCM 不肯把别人的容器给你、特权 profile 也没下发。
+
+诊断本身是**只读**的：只用 `csops(2)` 与 Security.framework 里签名稳定的两个函数（`SecTaskCreateFromSelf` / `SecTaskCopyValueForEntitlement`，用 `dlsym` 取），全程 `@try/@catch`、`CFRelease` 配对；读不到就打印「(读取不到)」，**绝不影响激活流程、也不会因此崩溃**。

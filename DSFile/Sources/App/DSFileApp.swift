@@ -32,6 +32,9 @@ struct DSFileApp: App {
                 .onAppear {
                     DSLog.shared.info("myfilza \(BuildInfo.version) (build \(BuildInfo.stamp)) 启动：\(DSKernel.deviceModelIdentifier()) / iOS \(DSKernel.systemVersion()) / \(DSKernel.cpuFamilyName())", source: "启动")
                     DSLog.shared.info(DSKernel.supportSummary(), source: "启动")
+                    // 签名标识诊断（只读）：MCM 的授权键是签名里的 CodeDirectory identifier，
+                    // 只改 Info.plist 的 bundle id 是不够的。拿不到就如实说拿不到，绝不影响激活。
+                    DSLog.shared.info(DSSignatureDiagnosticReport(), source: "签名")
                     kernel.refresh()
                     browser.load(path: BrowserModel.defaultStartPath())
                     kernel.activateIfNeeded()

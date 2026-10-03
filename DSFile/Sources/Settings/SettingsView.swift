@@ -43,11 +43,17 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.7.2"
+    private static let appVersion = "0.7.3"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.7.3", date: "2026-10-04", items: [
+            "**新增「签名 identifier」诊断**（真机反馈的下一跳）：MCM 的授权键是**签名时的 CodeDirectory identifier**，所以只把 `CFBundleIdentifier` 改成 `com.apple.mobile.MobileHouseArrest` 是不够的 —— 真机上的表现正是「只能枚举到 1 个容器（=自己）+ 沙盒外写探针失败」",
+            "**日志里直接给结论**：启动时与 MHA 路径开始时各打一次，格式为 `[MHA 诊断] 签名 identifier = <值>（期望 com.apple.mobile.MobileHouseArrest）→ 匹配 / 不匹配 / 无法判断`，并附带 `TeamIdentifier`、`application-identifier` 与 `csops` 原始值",
+            "**读法与安全**：只用签名确定的接口（`csops(2)` 与 Security.framework 的 `SecTaskCreateFromSelf` / `SecTaskCopyValueForEntitlement`，用 `dlsym` 取，不猜任何私有函数签名）；全程 `@try/@catch` 且 `CFRelease` 配对，读不到就如实打印「读取不到」，**绝不因此崩溃或阻塞激活**",
+            "**不匹配时给出可执行的修复指引**：把签名工具里的 Bundle ID / Signing Identifier 设为 `com.apple.mobile.MobileHouseArrest`，并确认没有使用「自动生成 Bundle ID」"
+        ]),
         ChangeEntry(version: "0.7.2", date: "2026-10-04", items: [
             "**补上 MHA 路径缺的第②步**：以前只把 Bundle ID 改成 `com.apple.mobile.MobileHouseArrest`（第①步：拿到特权沙盒 profile），但没有向 MCM **索取容器租约**，所以看不到别的 App 容器 —— 现在会主动枚举容器标识并逐个取租约、激活沙盒扩展",
             "**严格按上游 PoC 的请求序列实现**（`0xjohnnydev/FilzaSlop` 与 `MobileHouseArrest-PoC`）：`container_query_create` → `set_class`（2 = App 数据容器，7 = App Group）→ `set_identifiers`（目标 bundle id）→ `operation_set_flags(0x900000000)` → `get_single_result` → 取沙盒令牌 → 激活扩展",
