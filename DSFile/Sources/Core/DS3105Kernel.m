@@ -51,6 +51,7 @@ BOOL DS3105KernelSelected(void)
 }
 
 NSString * const DS3105KernelUseKernelExploitKey = @"myfilza.3105UseKernelExploit";
+NSString * const DSSafeModeDefaultsKey            = @"myfilza.safeMode";
 
 /// 是否使用内核漏洞。**默认 NO**：只走纯用户态的 bad_query 令牌路径。
 BOOL DS3105KernelUseKernelExploit(void)
@@ -58,6 +59,14 @@ BOOL DS3105KernelUseKernelExploit(void)
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if ([d objectForKey:DS3105KernelUseKernelExploitKey] == nil) return NO;   // 没设置过 = 关闭
     return [d boolForKey:DS3105KernelUseKernelExploitKey];
+}
+
+/// 安全模式：任何模式都不跑内核漏洞。**默认 NO**（不改变 FilzaJailedDS 的既有行为）。
+BOOL DSSafeModeEnabled(void)
+{
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d objectForKey:DSSafeModeDefaultsKey] == nil) return NO;
+    return [d boolForKey:DSSafeModeDefaultsKey];
 }
 
 #pragma mark - 纯用户态令牌路径（bad_query + sandbox_extension_consume，完全不碰内核）
@@ -213,19 +222,32 @@ int DS3105KernelActivate(NSString *_Nullable *_Nullable detail)
     // 用户真机反馈：3105 的内核阶段（kexploit_opa334 / sandbox_escape）在 iPhone13,4 / iOS 18.5
     // 上会崩溃、而且连崩溃日志都留不下（说明是内核 panic 或被系统 kill），
     // 所以内核路径必须由用户在设置里显式开启，默认一律走不会 panic 的 bad_query 令牌路径。
-    if (!DS3105KernelUseKernelExploit()) {
-        NSLog(@"[3105] 仅用户态令牌模式（未开启内核漏洞）");
+    BOOL safeMode  = DSSafeModeEnabled();
+    BOOL useKernel = DS3105KernelUseKernelExploit() && !safeMode;
+
+    if (!useKernel) {
+        NSLog(@"[3105] 仅用户态令牌模式（%s）",
+              safeMode ? "安全模式已开启，强制不跑内核漏洞" : "未开启内核漏洞");
         return DS3105KernelActivateUserspaceOnly(detail);
+    }
+
+    // ---- 适用性检查：超出声明范围时**不硬跑**内核阶段（稳定性优先）----
+    if (!ds3105_version_in_declared_range()) {
+        g3105LastStage = @"适用性检查：超出 3105 声明范围，已跳过内核阶段";
+        NSLog(@"[3105] ⚠️ 当前系统不在 3105 声明支持范围（17.0–18.7.1 / 26.0–26.6.1 / 27 beta）内："
+               "按稳定性优先原则**跳过内核阶段**，只走纯用户态令牌。需要内核读写请改用 FilzaJailedDS 模式。");
+        NSString *upDetail = nil;
+        int upRet = DS3105KernelActivateUserspaceOnly(&upDetail);
+        if (detail) {
+            *detail = [NSString stringWithFormat:
+                       @"3105 模式：系统不在其声明范围内，已跳过内核阶段（只走用户态令牌，避免不必要的风险）。%@",
+                       upDetail ?: @""];
+        }
+        return upRet;
     }
 
     NSLog(@"[3105] ⚠️ 用户显式开启了内核漏洞路径：**只执行 kexploit_opa334**（拿内核读写）；"
            "**不会**调用 3105 的 proc_self / sandbox_escape");
-
-    if (!ds3105_version_in_declared_range()) {
-        // 不阻止执行，但要说清楚：这是 3105 未声明支持的版本
-        g3105LastStage = @"版本提示";
-        NSLog(@"[3105] 当前系统不在 3105 声明支持的范围内，仍会尝试执行（失败属预期）");
-    }
 
     // ---- 可选阶段：内核读写（只有用户显式开启才会走到这里）----
     //

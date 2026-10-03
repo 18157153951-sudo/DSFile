@@ -52,7 +52,9 @@ struct SettingsView: View {
             "**修掉 3105 模式一跑就闪退**：真机日志显示 3105 的 `proc_self()` 在这类机型上会拿 0 去读内核地址，而它的 `early_kread` 遇到非法地址是**原地自旋**，最后被系统 watchdog 杀掉进程（设备不重启、也没有崩溃日志）",
             "3105 模式**默认改成纯用户态令牌**：只走 `bad_query`（ContainerManager 查询越权换沙盒扩展令牌），完全不执行内核漏洞，不会自旋也不会重启；容器访问照样可用",
             "「使用内核漏洞」变成**需要你显式开启**的开关（默认关），开关旁写明风险；开启后**只跑 `kexploit_opa334` 取内核读写**，**不再调用** 3105 的 `proc_self` / `sandbox_escape`",
-            "执行内核阶段前会先往面包屑与会话日志各写一行（两者都 fsync 过），万一之后崩了，也能从落盘日志看出死在哪个阶段"
+            "执行内核阶段前会先往面包屑与会话日志各写一行（两者都 fsync 过），万一之后崩了，也能从落盘日志看出死在哪个阶段",
+            "**新增「安全模式」总开关**（默认关）：开启后任何模式都不执行内核漏洞——3105 强制只用用户态令牌，FilzaJailedDS 会被阻止并提示改用 3105",
+            "新增**适用性检查**：所选模式超出其声明支持范围时**不硬跑内核阶段**，自动只走用户态令牌，并在日志里写明原因"
         ]),
         ChangeEntry(version: "0.5.0", date: "2026-10-03", items: [
             "**新增第二个内核模式「3105」**（设置 → 内核模式里切换，默认仍是 FilzaJailedDS 2.2）：3105 自带更新的 offset 表，声明支持 iOS 17.0–18.7.1 / 26.0–26.6.1 / 27 beta，比现有后端覆盖更宽",
@@ -231,6 +233,9 @@ struct SettingsView: View {
     /// 与 DS3105Kernel.h 的 DS3105KernelUseKernelExploitKey 保持一致：3105 模式是否使用内核漏洞（**默认关**）
     @AppStorage("myfilza.3105UseKernelExploit") private var useKernelExploit3105: Bool = false
 
+    /// 与 DS3105Kernel.h 的 DSSafeModeDefaultsKey 保持一致：安全模式（任何模式都不跑内核漏洞，**默认关**）
+    @AppStorage("myfilza.safeMode") private var safeMode: Bool = false
+
     private var backendSection: some View {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let major = v.majorVersion, minor = v.minorVersion, patch = v.patchVersion
@@ -289,6 +294,18 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.vertical, 2)
+            }
+
+            Toggle(isOn: $safeMode) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("安全模式（不跑任何内核漏洞）")
+                        .font(.subheadline)
+                    Text(safeMode
+                         ? "已开启：3105 强制只用用户态令牌；FilzaJailedDS 需要内核漏洞，会被阻止执行"
+                         : "默认关闭。开启后任何模式都不执行内核漏洞——绝不重启，代价是能力受限")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
 
             if !selectedInRange {

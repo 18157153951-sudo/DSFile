@@ -442,6 +442,14 @@ static uint32_t ds_cpu_family(void)
         // （未选中时这个 if 恒为假，下面的代码与 0.4.0 逐字一致）
         if (DS3105KernelSelected()) {
             result = [self ds_activate3105WithLog:log];
+        } else if (DSSafeModeEnabled()) {
+            // 安全模式：FilzaJailedDS 整体依赖内核漏洞，按用户设置阻止执行。
+            // 默认关闭，所以不影响既有行为；开启时只提示、不硬跑。
+            if (log) log(@"[myfilza] 安全模式已开启：FilzaJailedDS 模式必须使用内核漏洞，已阻止执行。"
+                          "要拿容器访问请切换到「3105」（默认仅用户态令牌），或到设置里关闭安全模式。");
+            gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultExploitFailed
+                                         userInfo:@{ NSLocalizedDescriptionKey: @"安全模式已开启：FilzaJailedDS 需要内核漏洞，已被阻止；请改用 3105 模式或关闭安全模式" }];
+            result = DSKernelResultExploitFailed;
         } else if (gEscaped) {
             if (log) log(@"[myfilza] 本进程沙盒已经是逃逸状态");
             result = DSKernelResultAlreadyActive;

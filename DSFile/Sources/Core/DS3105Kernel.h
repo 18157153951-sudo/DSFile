@@ -65,4 +65,18 @@ FOUNDATION_EXPORT int DS3105KernelActivateUserspaceOnly(NSString *_Nullable *_Nu
 /// 用于「替换目标在 /var/mobile 之外」时补权限，不需要重跑任何内核代码。
 FOUNDATION_EXPORT BOOL DS3105KernelEnsureAccessForPath(NSString *path);
 
+#pragma mark - 安全模式（稳定性优先）
+
+/// 「安全模式」的 UserDefaults 键。默认 **NO**（保持 FilzaJailedDS 既有行为不变）。
+FOUNDATION_EXPORT NSString * const DSSafeModeDefaultsKey;   // myfilza.safeMode
+
+/// 安全模式是否开启。
+///
+/// 开启后：**任何模式都不执行内核漏洞**——
+///   · 3105 模式：强制只走纯用户态令牌（忽略「使用内核漏洞」开关），并在日志里标注；
+///   · FilzaJailedDS 模式：它整体依赖内核漏洞，因此在安全模式下会被**阻止执行**并提示改用 3105 令牌模式。
+///
+/// 目的：给用户一个「绝对不碰内核、绝不重启」的开关，代价是能力受限。
+FOUNDATION_EXPORT BOOL DSSafeModeEnabled(void);
+
 NS_ASSUME_NONNULL_END
