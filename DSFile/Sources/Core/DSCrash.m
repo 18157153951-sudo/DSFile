@@ -55,7 +55,7 @@ static void ds_signal_handler(int sig)
         if (fd >= 0) {
             char header[512];
             int n = snprintf(header, sizeof(header),
-                             "=== DSFile 崩溃报告 ===\n"
+                             "=== myfilza 崩溃报告 ===\n"
                              "时间戳: %ld\n"
                              "信号: %s (%d)\n"
                              "回溯:\n",
@@ -80,7 +80,7 @@ static void ds_exception_handler(NSException *exception)
 {
     // 未捕获 ObjC 异常发生在正常上下文里，可以放心用 Foundation
     NSMutableString *text = [NSMutableString string];
-    [text appendString:@"=== DSFile 未捕获异常 ===\n"];
+    [text appendString:@"=== myfilza 未捕获异常 ===\n"];
     [text appendFormat:@"名称: %@\n", exception.name];
     [text appendFormat:@"原因: %@\n", exception.reason];
     [text appendString:@"调用栈:\n"];

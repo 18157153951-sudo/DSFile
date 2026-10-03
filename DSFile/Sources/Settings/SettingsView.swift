@@ -36,15 +36,21 @@ struct SettingsView: View {
     @State private var alertTitle: String = ""
     @State private var alertMessage: String = ""
     @State private var alertVisible: Bool = false
+    @State private var elevateConfirmVisible: Bool = false
 
     // MARK: 常量
 
-    private static let appName = "暗剑文件"
-    private static let appVersion = "0.2.0"
+    private static let appName = "myfilza"
+    private static let appVersion = "0.3.0"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.3.0", date: "2026-10-03", items: [
+            "改名 myfilza（bundle id 不变，覆盖升级不会丢脚本、备份和日志）",
+            "「提权到 root」加固：没激活内核访问时明确提示并弹窗说明；执行前先弹确认；每一次写入前都过地址闸门；写完回读 cr_uid / cr_ruid / cr_svuid / cr_groups / cr_rgid / cr_svgid 写进日志",
+            "逃逸与提权都不再走那条会野读 0x378、让 App 直接退到桌面的旧路径"
+        ]),
         ChangeEntry(version: "0.2.0", date: "2026-10-03", items: [
             "新增「替换」页：选目标 App，把本地文件加进来，按文件名自动在它的数据容器里找到同名文件，一键替换",
             "同名多处或找不到时，点那一行从候选里选，或手填完整路径",
@@ -163,20 +169,22 @@ struct SettingsView: View {
         .disabled(kernel.busy)
     }
 
-    /// 提权行
+    /// 提权行：没激活时点它给「请先激活」提示；激活后点它先弹确认说明后果
     private var elevateRow: some View {
         Button(action: {
+            guard !kernel.busy else { return }
             guard DSKernel.isExploitDone() else {
-                DSLog.shared.warn("还没有内核读写，「提权到 root」现在点了也不会生效：请先点上面的「激活内核访问」", source: "设置")
+                DSLog.shared.warn("「提权到 root」需要先有内核读写：请先点上面的「激活内核访问」", source: "设置")
+                presentAlert("请先激活内核访问",
+                             "提权要改写内核里的凭据，必须先成功跑完一次「激活内核访问」。激活成功后再点这一项。")
                 return
             }
-            DSLog.shared.info("用户请求提权到 root", source: "设置")
-            kernel.elevateToRoot()
+            elevateConfirmVisible = true
         }) {
             HStack(spacing: 12) {
                 Image(systemName: "lock.open.fill")
                     .font(.title3)
-                    .foregroundColor(kernel.isRoot ? .green : .orange)
+                    .foregroundColor(kernel.isRoot ? .green : (DSKernel.isExploitDone() ? .orange : .secondary))
                     .frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("提权到 root")
@@ -192,13 +200,26 @@ struct SettingsView: View {
                 }
             }
         }
-        .disabled(kernel.busy || kernel.isRoot || !DSKernel.isExploitDone())
+        .disabled(kernel.busy || kernel.isRoot)
+        .confirmationDialog("确认把本进程提权到 root？",
+                            isPresented: $elevateConfirmVisible,
+                            titleVisibility: .visible) {
+            Button("确认提权（不可逆）", role: .destructive) {
+                DSLog.shared.info("用户确认提权到 root，开始改写 posix_cred", source: "设置")
+                kernel.elevateToRoot()
+            }
+            Button("取消", role: .cancel) {
+                DSLog.shared.info("用户取消了提权", source: "设置")
+            }
+        } message: {
+            Text("本进程的 uid 会变成 0（root）：这是内核里的凭据改写，重启 App 才会恢复，App 自身行为也可能因此变化。失败不会影响已经拿到的沙盒逃逸。")
+        }
     }
 
     private var elevateSubtitle: String {
         if kernel.isRoot { return "当前已经是 root（uid 0）" }
-        if !DSKernel.isExploitDone() { return "需要先激活内核访问；这是可选的补救手段，点了没反应说明条件还不满足" }
-        return "把本进程的 uid 换成 0，写 root 文件更省事（有轻微风险，写不进 root 文件时再用）"
+        if !DSKernel.isExploitDone() { return "需要先「激活内核访问」；没激活时点它会提示你去激活" }
+        return "把本进程的 uid 改成 0，写 root 文件更省事；执行前会先弹确认"
     }
 
     /// 自动激活开关
@@ -382,7 +403,7 @@ struct SettingsView: View {
             InfoRow(icon: "info.circle",
                     tint: .blue,
                     title: "名称",
-                    detail: "\(Self.appName)（DSFile）")
+                    detail: Self.appName)
             InfoRow(icon: "number",
                     tint: .blue,
                     title: "版本",
@@ -530,7 +551,7 @@ struct SettingsView: View {
 
     private func shareDiagnostics() {
         let text = DSKernel.diagnosticsText()
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("DSFile-诊断.txt")
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("myfilza-诊断.txt")
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)
         } catch {

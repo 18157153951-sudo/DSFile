@@ -40,8 +40,8 @@ jobs:
         working-directory: DSFile
         run: |
           xcodebuild build \
-            -project DSFile.xcodeproj \
-            -target DSFile \
+            -project myfilza.xcodeproj \
+            -target myfilza \
             -configuration Release \
             -sdk iphoneos \
             CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos" \
@@ -54,7 +54,7 @@ jobs:
       - name: 确认漏洞代码真的被链进去了
         working-directory: DSFile
         run: |
-          BIN=build/Release-iphoneos/DSFile.app/DSFile
+          BIN=build/Release-iphoneos/myfilza.app/myfilza
           ls -lh "$BIN"
           for SYMBOL in kexploit_opa334 DSCredEscapeSandbox xpf_start_with_kernel_path; do
             if nm -a "$BIN" 2>/dev/null | grep -q "$SYMBOL"; then
@@ -72,7 +72,7 @@ jobs:
         run: |
           rm -rf Payload DSFile.ipa
           mkdir -p Payload
-          cp -R build/Release-iphoneos/DSFile.app Payload/
+          cp -R build/Release-iphoneos/myfilza.app Payload/
           zip -qry DSFile.ipa Payload
           ls -lh DSFile.ipa
           echo "SHA256: $(shasum -a 256 DSFile.ipa | awk '{print $1}')"

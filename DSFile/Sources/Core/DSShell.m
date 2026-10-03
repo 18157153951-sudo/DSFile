@@ -18,7 +18,7 @@ extern char **environ;
 
 static NSError *ds_error(int code, NSString *message)
 {
-    return [NSError errorWithDomain:@"DSFile.Shell" code:code
+    return [NSError errorWithDomain:@"myfilza.Shell" code:code
                            userInfo:@{ NSLocalizedDescriptionKey: message ?: @"未知错误" }];
 }
 

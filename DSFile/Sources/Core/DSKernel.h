@@ -60,7 +60,7 @@ typedef void (^DSKernelLogBlock)(NSString *line);
 + (DSKernelResult)activateWithLog:(nullable DSKernelLogBlock)log NS_SWIFT_NAME(activate(log:));
 /// 只重试沙盒改写（漏洞已成功时可用）
 + (DSKernelResult)retrySandboxEscapeWithLog:(nullable DSKernelLogBlock)log NS_SWIFT_NAME(retrySandboxEscape(log:));
-/// 提权到 uid=0（把本进程 ucred 换成 launchd 的），失败不影响已获得的沙盒逃逸
+/// 提权到 uid=0（把本进程 ucred 的 posix_cred uid/gid 改成 0），失败不影响已获得的沙盒逃逸
 + (DSKernelResult)elevateToRootWithLog:(nullable DSKernelLogBlock)log NS_SWIFT_NAME(elevateToRoot(log:));
 
 #pragma mark - 内核级文件属性

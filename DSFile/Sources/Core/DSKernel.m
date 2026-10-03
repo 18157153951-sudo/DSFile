@@ -358,7 +358,7 @@ static uint32_t ds_cpu_family(void)
 {
     @synchronized (self) {
         if (gExploitRunning) {
-            if (log) log(@"[DSFile] 激活正在进行中，忽略重复请求");
+            if (log) log(@"[myfilza] 激活正在进行中，忽略重复请求");
             return DSKernelResultBusy;
         }
         gExploitRunning = YES;
@@ -369,55 +369,55 @@ static uint32_t ds_cpu_family(void)
         if (log) ds_capture_start(log);
 
         if (gEscaped) {
-            if (log) log(@"[DSFile] 本进程沙盒已经是逃逸状态");
+            if (log) log(@"[myfilza] 本进程沙盒已经是逃逸状态");
             result = DSKernelResultAlreadyActive;
         } else if (![self isSystemVersionSupported]) {
-            if (log) log([NSString stringWithFormat:@"[DSFile] %@", [self supportSummary]]);
-            gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultUnsupportedSystem
+            if (log) log([NSString stringWithFormat:@"[myfilza] %@", [self supportSummary]]);
+            gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultUnsupportedSystem
                                          userInfo:@{ NSLocalizedDescriptionKey: [self supportSummary] }];
             result = DSKernelResultUnsupportedSystem;
         } else if (gExploitDone) {
-            if (log) log(@"[DSFile] 内核读写已在本次进程内取得，跳过漏洞，只重试沙盒改写");
+            if (log) log(@"[myfilza] 内核读写已在本次进程内取得，跳过漏洞，只重试沙盒改写");
             result = [self ds_escapeStepWithLog:log];
         } else if (gExploitAttempted) {
-            if (log) log(@"[DSFile] 本次运行已经执行过一次内核漏洞且没有成功。同一个进程里重跑风险极高，"
+            if (log) log(@"[myfilza] 本次运行已经执行过一次内核漏洞且没有成功。同一个进程里重跑风险极高，"
                           "请从后台完全退出 App 再重新打开后重试。");
-            gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
+            gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultExploitFailed
                                          userInfo:@{ NSLocalizedDescriptionKey: @"本次运行已尝试过内核漏洞，请重启 App 后再试" }];
             result = DSKernelResultExploitFailed;
         } else {
             gExploitAttempted = YES;
-            if (log) log([NSString stringWithFormat:@"[DSFile] 目标: %@ / iOS %@ / %@",
+            if (log) log([NSString stringWithFormat:@"[myfilza] 目标: %@ / iOS %@ / %@",
                           [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
-            if (log) log(@"[DSFile] 开始执行内核漏洞（FilzaJailedDS 原版 kexploit_opa334，可能耗时数秒，界面短暂无响应属正常）…");
-            ds_breadcrumb_write("[DSFile] → kexploit_opa334() 开始\n");
+            if (log) log(@"[myfilza] 开始执行内核漏洞（FilzaJailedDS 原版 kexploit_opa334，可能耗时数秒，界面短暂无响应属正常）…");
+            ds_breadcrumb_write("[myfilza] → kexploit_opa334() 开始\n");
 
             int kret = 1;
             @try {
                 kret = kexploit_opa334();
             } @catch (NSException *e) {
-                if (log) log([NSString stringWithFormat:@"[DSFile] 漏洞抛出异常: %@", e.reason]);
-                ds_breadcrumb_write("[DSFile] kexploit 抛异常: %s\n", e.reason.UTF8String ?: "?");
+                if (log) log([NSString stringWithFormat:@"[myfilza] 漏洞抛出异常: %@", e.reason]);
+                ds_breadcrumb_write("[myfilza] kexploit 抛异常: %s\n", e.reason.UTF8String ?: "?");
                 kret = -1;
             }
 
-            ds_breadcrumb_write("[DSFile] ← kexploit_opa334() 返回 %d；kernel_base=0x%llx slide=0x%llx rwSocketPcb=0x%llx\n",
+            ds_breadcrumb_write("[myfilza] ← kexploit_opa334() 返回 %d；kernel_base=0x%llx slide=0x%llx rwSocketPcb=0x%llx\n",
                                 kret, (unsigned long long)g_kernel_base, (unsigned long long)g_kernel_slide,
                                 (unsigned long long)rwSocketPcb);
             if (log) log([NSString stringWithFormat:
-                          @"[DSFile] 漏洞返回 %d；kernel_base=0x%llx（slide 0x%llx）；rw_socket_pcb=0x%llx",
+                          @"[myfilza] 漏洞返回 %d；kernel_base=0x%llx（slide 0x%llx）；rw_socket_pcb=0x%llx",
                           kret, (unsigned long long)g_kernel_base, (unsigned long long)g_kernel_slide,
                           (unsigned long long)rwSocketPcb]);
 
             if (kret != 0) {
-                if (log) log(@"[DSFile] 内核漏洞没有成功（race 失败是最常见原因）。"
+                if (log) log(@"[myfilza] 内核漏洞没有成功（race 失败是最常见原因）。"
                               "设备没有重启就说明没伤到内核，完全退出 App 重开后再试即可。");
-                gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
+                gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultExploitFailed
                                              userInfo:@{ NSLocalizedDescriptionKey: @"内核漏洞 race 失败，请退出 App 重开后重试" }];
                 result = DSKernelResultExploitFailed;
             } else {
                 gExploitDone = YES;
-                if (log) log([NSString stringWithFormat:@"[DSFile] 内核读写已获得，kernel base = 0x%llx",
+                if (log) log([NSString stringWithFormat:@"[myfilza] 内核读写已获得，kernel base = 0x%llx",
                               (unsigned long long)g_kernel_base]);
                 result = [self ds_escapeStepWithLog:log];
             }
@@ -440,7 +440,7 @@ static uint32_t ds_cpu_family(void)
     @try {
         if (log) ds_capture_start(log);
         if (!gExploitDone) {
-            if (log) log(@"[DSFile] 内核读写还没拿到，必须先跑完整激活");
+            if (log) log(@"[myfilza] 内核读写还没拿到，必须先跑完整激活");
             result = DSKernelResultExploitFailed;
         } else {
             result = [self ds_escapeStepWithLog:log];
@@ -458,16 +458,16 @@ static uint32_t ds_cpu_family(void)
 {
     if (!ds_kernel_rw_healthy()) {
         if (log) log([NSString stringWithFormat:
-                      @"[DSFile] 内核读写不可用：rw_socket_pcb=0x%llx control_socket_pcb=0x%llx 都不是合法内核地址。"
+                      @"[myfilza] 内核读写不可用：rw_socket_pcb=0x%llx control_socket_pcb=0x%llx 都不是合法内核地址。"
                        "请完全退出 App 重开后再点一次「激活内核访问」。",
                       (unsigned long long)rwSocketPcb, (unsigned long long)controlSocketPcb]);
-        gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultExploitFailed
+        gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultExploitFailed
                                      userInfo:@{ NSLocalizedDescriptionKey: @"内核读写不可用，请退出 App 重开后重试" }];
         return DSKernelResultExploitFailed;
     }
 
-    if (log) log(@"[DSFile] 开始改写本进程沙盒数据（cred 路线：两个 socket 的 so_cred 一致 + cr_uid 校验）…");
-    ds_breadcrumb_write("[DSFile] 逃逸开始（cred 路线）\n");
+    if (log) log(@"[myfilza] 开始改写本进程沙盒数据（cred 路线：两个 socket 的 so_cred 一致 + cr_uid 校验）…");
+    ds_breadcrumb_write("[myfilza] 逃逸开始（cred 路线）\n");
 
     DSCredEscapeSetLogCallback(ds_escape_log_bridge);
 
@@ -475,22 +475,22 @@ static uint32_t ds_cpu_family(void)
     @try {
         sret = DSCredEscapeSandbox();
     } @catch (NSException *e) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写异常: %@", e.reason]);
+        if (log) log([NSString stringWithFormat:@"[myfilza] 沙盒改写异常: %@", e.reason]);
         sret = -9;
     }
-    ds_breadcrumb_write("[DSFile] DSCredEscapeSandbox() 返回 %d（cred=0x%llx label=0x%llx ext_set=0x%llx）\n",
+    ds_breadcrumb_write("[myfilza] DSCredEscapeSandbox() 返回 %d（cred=0x%llx label=0x%llx ext_set=0x%llx）\n",
                         sret, DSCredEscapeLastCred(), DSCredEscapeLastLabel(), DSCredEscapeLastExtSet());
-    if (log) log([NSString stringWithFormat:@"[DSFile] 沙盒改写返回 %d（cred=0x%llx → ext_set=0x%llx）",
+    if (log) log([NSString stringWithFormat:@"[myfilza] 沙盒改写返回 %d（cred=0x%llx → ext_set=0x%llx）",
                   sret, DSCredEscapeLastCred(), DSCredEscapeLastExtSet()]);
 
     if (ds_probe_write_access()) {
         gEscaped = YES;
-        if (log) log(@"[DSFile] *** 沙盒逃逸成功：现在可以读写沙盒外的路径 ***");
+        if (log) log(@"[myfilza] *** 沙盒逃逸成功：现在可以读写沙盒外的路径 ***");
         return DSKernelResultOK;
     }
 
-    if (log) log([NSString stringWithFormat:@"[DSFile] 探针写盘失败 (errno=%d: %s)", errno, strerror(errno)]);
-    gLastError = [NSError errorWithDomain:@"DSFile" code:DSKernelResultEscapeFailed
+    if (log) log([NSString stringWithFormat:@"[myfilza] 探针写盘失败 (errno=%d: %s)", errno, strerror(errno)]);
+    gLastError = [NSError errorWithDomain:@"myfilza" code:DSKernelResultEscapeFailed
                                  userInfo:@{ NSLocalizedDescriptionKey: @"沙盒改写后探针写盘仍失败" }];
     return DSKernelResultEscapeFailed;
 }
@@ -499,29 +499,41 @@ static uint32_t ds_cpu_family(void)
 {
     if (getuid() == 0) return DSKernelResultAlreadyActive;
     if (!gExploitDone) {
-        if (log) log(@"[DSFile] 提权需要先有内核读写");
+        if (log) log(@"[myfilza] 提权需要先有内核读写：请先点「激活内核访问」，激活成功后再点这一项");
         return DSKernelResultExploitFailed;
     }
 
-    if (log) log(@"[DSFile] 尝试把本进程凭据改成 root（改写 ucred 里的 posix_cred）…");
-    ds_breadcrumb_write("[DSFile] 提权开始（cred 路线）\n");
+    if (log) log(@"[myfilza] 尝试把本进程凭据改成 root（改写 ucred 里的 posix_cred）…");
+    ds_breadcrumb_write("[myfilza] 提权开始（cred 路线）\n");
 
     DSCredEscapeSetLogCallback(ds_escape_log_bridge);
+
+    // 前置就绪校验在 DSCredEscape 内部还会再查一遍（rwSocketPcb / controlSocketPcb / g_kernel_base），
+    // 这里先查一次是为了在界面上给出更直白的提示，避免用户以为是别的问题。
+    if (!DSCredEscapeIsKernelReady()) {
+        if (log) log(@"[myfilza] 提权未执行：内核读写不在就绪状态（本次运行还没成功跑过漏洞）");
+        ds_breadcrumb_write("[myfilza] 提权未执行：DSCredEscapeIsKernelReady() = false\n");
+        return DSKernelResultExploitFailed;
+    }
 
     int ret = -1;
     @try {
         ret = DSCredEscapeElevateToRoot();
     } @catch (NSException *e) {
-        if (log) log([NSString stringWithFormat:@"[DSFile] 提权异常: %@", e.reason]);
+        if (log) log([NSString stringWithFormat:@"[myfilza] 提权异常: %@", e.reason]);
         ret = -1;
     }
-    ds_breadcrumb_write("[DSFile] DSCredEscapeElevateToRoot() 返回 %d\n", ret);
+
+    if (log) log([NSString stringWithFormat:@"[myfilza] DSCredEscapeElevateToRoot() 返回 %d；当前 uid=%d",
+                  ret, (int)getuid()]);
+    ds_breadcrumb_write("[myfilza] DSCredEscapeElevateToRoot() 返回 %d；uid=%d\n", ret, (int)getuid());
 
     if (getuid() == 0) {
-        if (log) log(@"[DSFile] 提权成功，当前 uid=0");
+        if (log) log(@"[myfilza] 提权成功，当前 uid=0（posix_cred 已被改写，日志里有改写前后回读）");
         return DSKernelResultOK;
     }
-    if (log) log([NSString stringWithFormat:@"[DSFile] 提权失败（ret=%d, uid=%d）", ret, getuid()]);
+    if (log) log([NSString stringWithFormat:@"[myfilza] 提权失败（返回码 %d, uid=%d）：失败不影响已获得的沙盒逃逸",
+                  ret, (int)getuid()]);
     return DSKernelResultEscapeFailed;
 }
 

@@ -7,5 +7,5 @@ import Foundation
 enum BuildInfo {
     /// 由 GitHub Actions 用 sed 替换，本地构建时保持 "dev"
     static let stamp = "dev"
-    static let version = "0.2.0"
+    static let version = "0.3.0"
 }

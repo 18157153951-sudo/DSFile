@@ -22,12 +22,22 @@
 typedef void (*DSCredEscapeLogFn)(const char *message);
 void DSCredEscapeSetLogCallback(DSCredEscapeLogFn callback);
 
+/// 内核读写是否真的就绪：上游全局量（rwSocketPcb / controlSocketPcb / g_kernel_base）
+/// 必须都是合法内核地址（漏洞成功跑完才会被赋值）。
+/// 任何「写内核内存」的动作（提权、逃逸改写）前都必须先过这一关；
+/// 未就绪时返回 false，并把是哪一项不合法打进日志。
+bool DSCredEscapeIsKernelReady(void);
+
 /// 只做沙盒逃逸：定位 cred → label → sandbox → ext_set → 改写扩展。
 /// 返回 0 = 成功；负数 = 失败（**失败路径绝不写内核内存**）。
 int DSCredEscapeSandbox(void);
 
 /// 把本进程凭据改成 root（改写 ucred 里的 posix_cred uid/gid 字段）。
-/// 返回 0 = 成功（getuid()==0），负数 = 失败。
+/// 返回 0 = 成功（getuid()==0）；
+///      -1 = 现场定位 cred 失败或复核不过；
+///      -2 = 写入被地址闸门拒绝（已停手）；
+///      -3 = 写完了但 getuid() 仍不是 0；
+///      -5 = 前置就绪校验未通过（本次运行还没有内核读写）。
 int DSCredEscapeElevateToRoot(void);
 
 /// 诊断用：最近一次成功定位到的对象地址（0 表示还没定位到）

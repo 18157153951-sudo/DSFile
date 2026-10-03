@@ -25,7 +25,7 @@ struct DSFileApp: App {
                 .environmentObject(kernel)
                 .environmentObject(browser)
                 .onAppear {
-                    DSLog.shared.info("DSFile \(BuildInfo.version) (build \(BuildInfo.stamp)) 启动：\(DSKernel.deviceModelIdentifier()) / iOS \(DSKernel.systemVersion()) / \(DSKernel.cpuFamilyName())", source: "启动")
+                    DSLog.shared.info("myfilza \(BuildInfo.version) (build \(BuildInfo.stamp)) 启动：\(DSKernel.deviceModelIdentifier()) / iOS \(DSKernel.systemVersion()) / \(DSKernel.cpuFamilyName())", source: "启动")
                     DSLog.shared.info(DSKernel.supportSummary(), source: "启动")
                     kernel.refresh()
                     browser.load(path: BrowserModel.defaultStartPath())

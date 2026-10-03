@@ -57,9 +57,9 @@ final class DSLog: ObservableObject {
 
     // MARK: - 对外接口
 
-    func info(_ text: String, source: String = "DSFile") { add(text, level: .info, source: source) }
-    func warn(_ text: String, source: String = "DSFile") { add(text, level: .warn, source: source) }
-    func error(_ text: String, source: String = "DSFile") { add(text, level: .error, source: source) }
+    func info(_ text: String, source: String = "myfilza") { add(text, level: .info, source: source) }
+    func warn(_ text: String, source: String = "myfilza") { add(text, level: .warn, source: source) }
+    func error(_ text: String, source: String = "myfilza") { add(text, level: .error, source: source) }
     func kernel(_ text: String) { add(text, level: .kernel, source: "DarkSword") }
 
     func add(_ text: String, level: DSLogLevel, source: String) {
@@ -120,7 +120,7 @@ final class DSLog: ObservableObject {
 
         writeQueue.async { [weak self] in
             guard let self = self, let handle = self.fileHandle else { return }
-            let header = "=== DSFile 会话日志 \(Date()) ===\n"
+            let header = "=== myfilza 会话日志 \(Date()) ===\n"
             if let data = header.data(using: .utf8) {
                 try? handle.write(contentsOf: data)
                 try? handle.synchronize()
