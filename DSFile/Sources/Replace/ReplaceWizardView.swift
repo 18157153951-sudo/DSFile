@@ -2641,11 +2641,17 @@ struct TargetFirstRequest: Identifiable {
 }
 
 /// 目标优先：某一条目标还没配上本地文件，等本机选择器选完绑上去
-struct PendingLocalPick: Identifiable {
+/// 需要 Equatable：视图里用 .onChange(of: pendingLocalPick) 观察它
+struct PendingLocalPick: Identifiable, Equatable {
     let id = UUID()
     let rowID: UUID
     let target: String
     let inBundle: Bool
+
+    // id 每次都是新的，比较时忽略它，只看真正决定行为的字段
+    static func == (lhs: PendingLocalPick, rhs: PendingLocalPick) -> Bool {
+        lhs.rowID == rhs.rowID && lhs.target == rhs.target && lhs.inBundle == rhs.inBundle
+    }
 }
 
 // MARK: - 单条记录的日志
