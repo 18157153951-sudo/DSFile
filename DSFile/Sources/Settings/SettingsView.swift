@@ -43,11 +43,18 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.7.4"
+    private static let appVersion = "0.8.0"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.8.0", date: "2026-10-04", items: [
+            "**没权限也能列出 App**：App 列表多了一个**不需要任何权限**的来源 —— 私有接口 `LSApplicationWorkspace`（运行时查找，不链接私有框架）。以前没逃逸 / 没激活时永远显示「扫描到 0 个 App」，现在**打开就能看到 App 列表**（名字、图标、容器路径），只有「读容器里的文件」需要先激活",
+            "**应用管理器不再因为没权限就空白**：未激活时会显示列表 + 一条说明「列表来自系统接口（不需要权限）；读取容器内容需要先激活」，点进目录读不到时会明确提示「需要先激活访问才能读取容器内容」，不再留白",
+            "**列表来源写进日志**：每次真实扫描都会记一行「列表来源=LSApplicationWorkspace / 容器扫描 / 两者合并；各多少条；文件系统访问=是/否」，出问题一眼能看出列表从哪来",
+            "**3105 模式按系统版本分流**（依据 3105 自己的 README `iOS 18 | 18.0–18.7.1 (kernel exploit)` 与 `KernelExploit.swift` 的 `requiresSandboxEscape = majorVersion >= 26`）：iOS < 26 → ① 内核 R/W + cred 路线逃逸 ② bad_query 兜底；iOS ≥ 26 → ① MHA/MCM（零内核）② bad_query 用户态令牌 ③ 内核兜底",
+            "**bad_query 诊断**：每次激活都打印 ContainerManager 私有符号的可用性（缺哪个也列出来）。`bad_query` 是「全有或全无」校验，iOS 18.x 上恒缺 `container_query_operation_set_part` / `…_set_part_domain`，所以它在 18.x 必然失败、只有 26+ 才齐全 —— 这样即使我们手上只有 18.5 设备，26/27 上的失败也能靠日志定位"
+        ]),
         ChangeEntry(version: "0.7.4", date: "2026-10-04", items: [
             "**两条路共存 + 用户自己切换**：设置页新增「访问路径」三选一 —— **自动（推荐）/ 仅 MHA（零内核）/ 仅内核（FilzaJailedDS）**，选择会持久化，每次激活都把「当前选择 + 实际走的路径」写进日志",
             "**修掉 0.7.3 的错报成功**：MHA 路径以前把「持有租约数 > 0」当成成功（真机日志里明明只拿到自己一个容器、写探针 `EPERM`，却打了 `沙盒逃逸成功`）—— 现在成功判据是**真的能写沙盒外**或**真的拿到别人的容器（App 数据容器 > 1 个）**，只看租约不算",
@@ -434,6 +441,11 @@ struct SettingsView: View {
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
                 Text(recommendationText(filzaInRange: filzaInRange, t3105InRange: t3105InRange, device: device, os: os))
+                Text("按系统版本的机制选择（各模式内部自动分流，日志里会写明选了哪条）："
+                     + "iOS 18.x → ① 内核 R/W + cred 路线逃逸 ② bad_query 兜底；"
+                     + "iOS 26/27 → ① MHA/MCM（零内核）② bad_query 用户态令牌 ③ 内核兜底。")
+                Text("依据：3105 自己的 README 写 `iOS 18 | 18.0–18.7.1 (kernel exploit)`，26/27 两行没有 kernel exploit；"
+                     + "其 KernelExploit.swift 里 `requiresSandboxEscape = majorVersion >= 26`。")
                 Text("两个模式互相独立、各跑各的代码；切换后需要重新点一次「激活内核访问」。默认模式的行为与之前完全一致。")
             }
             .font(.footnote)

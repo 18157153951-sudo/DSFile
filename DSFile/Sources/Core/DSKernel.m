@@ -385,6 +385,23 @@ static uint32_t ds_cpu_family(void)
     if (log) log([NSString stringWithFormat:@"[myfilza] 目标: %@ / iOS %@ / %@",
                   [self deviceModelIdentifier], [self systemVersion], [self cpuFamilyName]]);
 
+    // 按系统版本说明这次的机制顺序（依据 3105 自己的 README 与 helpers/KernelExploit.swift）：
+    //   README：`iOS 18 | 18.0–18.7.1 (kernel exploit)`；26/27 两行没有 kernel exploit。
+    //   KernelExploit.swift：requiresSandboxEscape = majorVersion >= 26。
+    BOOL modern3105 = (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26);
+    if (log) {
+        log([NSString stringWithFormat:
+             @"[myfilza] 系统版本分流（3105 模式）：iOS %@ → 机制顺序 = %@",
+             modern3105
+                 ? [NSString stringWithFormat:@"%@（≥26）", [self systemVersion]]
+                 : [NSString stringWithFormat:@"%@（<26）", [self systemVersion]],
+             modern3105
+                 ? @"① MHA/MCM（零内核，已在上面先试） ② bad_query 用户态令牌 ③ 内核 R/W + cred 逃逸（兜底）"
+                 : @"① 内核 R/W + cred 路线逃逸 ② bad_query 用户态令牌（兜底）"]);
+        log(@"[myfilza] 依据：3105 README 写明 `iOS 18 | 18.0–18.7.1 (kernel exploit)`；"
+              "26/27 两行没有 kernel exploit；其 KernelExploit.swift 里 requiresSandboxEscape = majorVersion >= 26");
+    }
+
     if (useKernel3105) {
         // 只有真正要跑内核漏洞时才计入「本进程已尝试过」——纯用户态令牌模式可以反复重试。
         gExploitAttempted = YES;

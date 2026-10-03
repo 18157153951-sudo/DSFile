@@ -15,11 +15,20 @@ enum FileSystemError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .listingFailed(let path, let code):
+            // 没权限时把话说清：App 列表能列出来（走系统接口），但容器内容要激活后才能读。
+            if code == EACCES || code == EPERM {
+                if !EnvironmentProbe.hasFileSystemAccess() {
+                    return "无法读取 \(path)（errno \(code)）：需要先激活访问才能读取容器内容 —— "
+                         + "去「设置」页激活，或换成可用的访问路径"
+                }
+                return "无法读取 \(path)（errno \(code): \(String(cString: strerror(code))))："
+                     + "已激活但仍被拒绝，说明该路径不在本次取得的权限范围内"
+            }
             return "无法读取 \(path)（errno \(code): \(String(cString: strerror(code))))"
         case .notFound(let path):
             return "路径不存在：\(path)"
         case .denied(let path):
-            return "权限不足：\(path)（需要先激活内核访问）"
+            return "权限不足：\(path)（需要先激活访问）"
         case .invalidName:
             return "名称不合法"
         case .failed(let message):

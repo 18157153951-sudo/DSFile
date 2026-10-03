@@ -32,6 +32,7 @@
 #import <errno.h>
 #import <string.h>
 #import <sys/utsname.h>
+#import <dlfcn.h>          // bad_query 符号可用性诊断（dlopen/dlsym/dlclose）
 
 NSString * const DSKernelBackendDefaultsKey = @"myfilza.kernelBackend";
 NSString * const DSKernelBackendValueFilza  = @"filzajailedds";
@@ -174,8 +175,19 @@ BOOL DS3105KernelEnsureAccessForPath(NSString *path)
 /// 纯用户态激活：逐个根路径取令牌 → 读写探针验证。全程不执行任何内核代码。
 int DS3105KernelActivateUserspaceOnly(NSString *_Nullable *_Nullable detail)
 {
+    NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
+
     g3105LastStage = @"用户态令牌：开始取令牌";
-    NSLog(@"[3105] 纯用户态路径（不执行任何内核代码）；mcm_bridge 可用=%d", (int)MCMBridgeAvailable());
+
+    // 先报符号可用性：bad_query 是「全有或全无」校验，缺符号时直接 -1。
+    // iOS 18.x 必然缺 set_part*（实测 set_part=0x0）；26+ 才齐全 —— 这行让 26/27 也能定位。
+    NSString *missing = ds3105_badquery_missing_symbols();
+    NSLog(@"[3105] 纯用户态路径（不执行任何内核代码）；iOS %ld.%ld；mcm_bridge 可用=%d；bad_query 缺符号=%@",
+          (long)v.majorVersion, (long)v.minorVersion, (int)MCMBridgeAvailable(),
+          missing.length > 0 ? missing : @"无");
+    if (missing.length > 0) {
+        NSLog(@"[3105] 说明：bad_query 缺符号就会直接返回 -1（iOS 18.x 上恒缺 set_part*；26/27 才齐全）");
+    }
 
     NSArray<NSString *> *roots = ds3105_default_token_roots();
     NSMutableArray<NSString *> *got = [NSMutableArray array];
@@ -195,14 +207,19 @@ int DS3105KernelActivateUserspaceOnly(NSString *_Nullable *_Nullable detail)
     BOOL readOK  = (access("/var/mobile/Containers/Data/Application", R_OK) == 0)
                 || (access("/var/containers/Bundle/Application", R_OK) == 0);
 
+    NSString *missingNote = missing.length > 0
+        ? [NSString stringWithFormat:@"（bad_query 缺符号：%@）", missing]
+        : @"";
+
     if (!writeOK && !readOK) {
         if (detail) {
             *detail = [NSString stringWithFormat:
-                       @"3105 模式（仅用户态）：bad_query 取得 %lu 条令牌（%@），但沙盒外读写探针都失败"
-                        "——这条路径在你这个系统版本上可能已被修补。可在设置里显式开启「使用内核漏洞」再试"
-                        "（该路径有崩溃/重启风险）。",
+                       @"3105 模式（仅用户态）：bad_query 取得 %lu 条令牌（%@），但沙盒外读写探针都失败%@"
+                        "——这条路径只在 iOS 26+ 才齐全（18.x 上恒缺 set_part/set_part_domain）。"
+                        "可在设置里显式开启「使用内核漏洞」再试（该路径有崩溃/重启风险）。",
                        (unsigned long)got.count,
-                       got.count ? [got componentsJoinedByString:@"、"] : @"无"];
+                       got.count ? [got componentsJoinedByString:@"、"] : @"无",
+                       missingNote];
         }
         return 1003;
     }
@@ -587,6 +604,100 @@ int DS3105KernelElevateToRoot(NSString *_Nullable *_Nullable detail)
     return (uid == 0) ? 0 : 1012;
 }
 
+#pragma mark - bad_query 符号诊断（26+ 专用路径的可诊断性关键）
+
+/// bad_query 需要的私有符号里缺哪些（空字符串 = 齐全；打不开库 = "dlopen 失败"）。
+/// 18.x 上必然缺 `container_query_operation_set_part` / `…_set_part_domain`。
+static NSString *ds3105_badquery_missing_symbols(void)
+{
+    void *mgr = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!mgr) return @"dlopen(libsystem_containermanager) 失败";
+
+    static const char *names[] = {
+        "container_query_create",
+        "container_query_set_class",
+        "container_query_set_group_identifiers",
+        "container_query_operation_set_flags",
+        "container_query_operation_set_part",
+        "container_query_operation_set_part_domain",
+        "container_query_get_single_result",
+        "container_query_free",
+        "container_copy_sandbox_token",
+    };
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (!dlsym(mgr, names[i])) [missing addObject:@(names[i])];
+    }
+    if (!dlsym(RTLD_DEFAULT, "sandbox_extension_consume")) {
+        [missing addObject:@"sandbox_extension_consume"];
+    }
+    dlclose(mgr);
+    return missing.count > 0 ? [missing componentsJoinedByString:@","] : @"";
+}
+
+/// 报告 bad_query 需要的私有符号是否齐全。
+///
+/// 为什么必须打这条：bad_query.c 是**全有或全无**校验（少一个符号直接返回 -1），
+/// 而 iOS 18.x 的 libsystem_containermanager 里**没有**
+/// `container_query_operation_set_part` / `…_set_part_domain`（真机实测 set_part=0x0），
+/// 所以在 18.x 上它必然失败。我们手上只有 18.5 设备，26/27 只能靠这行日志定位。
+static void ds3105_log_badquery_symbols(void)
+{
+    NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
+    NSString *missing = ds3105_badquery_missing_symbols();
+    NSLog(@"[3105][bad_query 诊断] iOS %ld.%ld：ContainerManager 符号齐全=%d；缺失=%@",
+          (long)v.majorVersion, (long)v.minorVersion,
+          (int)(missing.length == 0),
+          missing.length > 0 ? missing : @"无");
+}
+
+#pragma mark - 各阶段（供按系统版本排序调用）
+
+/// 阶段：内核 R/W（3105 自带运行时 offset 反推）→ cred 路线逃逸 → 真实写探针。
+/// 只有用户开启「使用内核漏洞」且非安全模式时才调用。
+static int ds3105_stage_kernel(NSMutableArray<NSString *> *reasons)
+{
+    // **绝不调用 t3105_proc_self / t3105_sandbox_escape**：本机 so_background_thread == 0
+    // → 它们会拿 0 当 thread 去读 off_thread_t_tro(=0x388) → 3105 的 early_kread 遇非法地址
+    // 是**原地自旋**（不是返回失败）→ 被系统 watchdog 杀掉进程（设备不重启、也无崩溃日志）。
+    g3105LastStage = @"stage-kernel: kexploit_opa334 (kernel r/w)";
+    NSLog(@"[3105] stage-kernel: kernel r/w via kexploit_opa334 (proc_self/sandbox_escape NOT used)");
+    int kret = t3105_kexploit_opa334();
+    [reasons addObject:[NSString stringWithFormat:@"kernel=kexploit_opa334(%d)", kret]];
+    if (kret != 0) return 1004;
+
+    g3105LastStage = @"stage-escape: cred route escape";
+    NSLog(@"[3105] stage-escape: cred route escape");
+    NSString *ew = nil;
+    int eret = ds3105_cred_escape(&ew);
+    [reasons addObject:[NSString stringWithFormat:@"escape(%d) %@", eret, ew ?: @""]];
+    if (eret != 0) return 1005;
+
+    if (!ds3105_probe_write()) {
+        [reasons addObject:@"probe: outside-sandbox write failed after escape"];
+        return 1006;
+    }
+    return 0;
+}
+
+/// 阶段：纯用户态令牌（bad_query）。26+ 上这是首选，18.x 上是备选。
+static int ds3105_stage_tokens(NSMutableArray<NSString *> *reasons, NSString **outDetail)
+{
+    g3105LastStage = @"stage-tokens: userspace tokens (bad_query)";
+    NSLog(@"[3105] stage-tokens: userspace tokens (bad_query, no kernel)");
+    NSString *up = nil;
+    int upRet = DS3105KernelActivateUserspaceOnly(&up);
+    [reasons addObject:[NSString stringWithFormat:@"tokens(%d) %@", upRet, up ?: @""]];
+    if (outDetail) *outDetail = up;
+    if (upRet != 0) return upRet;
+    // 判据与 ActivateUserspaceOnly 内部一致：真的能写沙盒外 / 读沙盒外
+    if (!ds3105_probe_write()) {
+        [reasons addObject:@"probe: outside-sandbox write failed after tokens"];
+        return 1007;
+    }
+    return 0;
+}
+
 int DS3105KernelActivate(NSString *_Nullable *_Nullable detail)
 {
     g3105Ready = NO;
@@ -596,65 +707,81 @@ int DS3105KernelActivate(NSString *_Nullable *_Nullable detail)
     BOOL useKernel = DS3105KernelUseKernelExploit() && !safeMode;
     NSMutableArray<NSString *> *reasons = [NSMutableArray array];
 
-    // 说明（英文，避免 stdout 捕获时的编码问题）：
-    //   3105 模式在 18.x 上真正能用的路径 = 内核 R/W + cred 路线逃逸。
-    //   bad_query 用户态令牌只在 iOS 26+ 才有意义（18.5 上缺 container_query_operation_set_part*
-    //   符号 → 0 条令牌），所以它降级为备选分支。
+    NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
+    BOOL modern = (v.majorVersion >= 26);      // iOS 26+：内核 R/W 单独不够（3105 的 requiresSandboxEscape）
+
+    // ---- 机制顺序（依据 3105 自己的 README + helpers/KernelExploit.swift，不猜）----
+    //   README：`iOS 18 | 18.0–18.7.1 (kernel exploit)`；26/27 两行**没有** kernel exploit。
+    //   KernelExploit.swift：requiresSandboxEscape = majorVersion >= 26；
+    //      < 26 时 "kernel R/W alone is still a successful Active state"。
+    //   所以：18.x 内核优先；26+ 令牌（bad_query）优先，内核只作兜底。
+    NSString *order = modern
+        ? @"iOS 26+ → ① MHA/MCM（由上层先试）② bad_query 用户态令牌 ③ 内核兜底"
+        : @"iOS 18.x → ① 内核 R/W + cred 路线逃逸 ② bad_query 用户态令牌兜底";
+    NSLog(@"[3105] 系统 iOS %ld.%ld → 机制顺序：%@（useKernel=%d, safeMode=%d）",
+          (long)v.majorVersion, (long)v.minorVersion, order, (int)useKernel, (int)safeMode);
+
+    // 每次激活都报一次私有符号可用性：26/27 失败时这一行就能定位（18.x 上必然缺 set_part*）
+    ds3105_log_badquery_symbols();
+
+    int ret = 1002;
+
     if (!useKernel) {
+        // 用户关掉了内核漏洞（或开了安全模式）→ 只走用户态令牌
         NSLog(@"[3105] userspace-only (safeMode=%d, useKernel=0)", (int)safeMode);
-        g3105LastStage = @"userspace tokens only";
         NSString *up = nil;
-        int r = DS3105KernelActivateUserspaceOnly(&up);
+        ret = ds3105_stage_tokens(reasons, &up);
         if (detail) {
             *detail = [NSString stringWithFormat:@"3105 userspace-only: %@", up ?: @""];
         }
-        return r;
+        if (ret == 0) {
+            g3105Ready = YES;
+            g3105LastStage = @"done: userspace tokens";
+        } else {
+            g3105LastStage = @"failed: userspace tokens";
+        }
+        return ret;
     }
 
     if (!ds3105_version_in_declared_range()) {
         NSLog(@"[3105] warning: OS outside 3105 declared range; still trying (offset table is runtime-derived)");
     }
 
-    // ---- 阶段 1：内核读写（3105 自带运行时 offset 反推）----
-    // **绝不调用 t3105_proc_self / t3105_sandbox_escape**：本机 so_background_thread == 0
-    // → 它们会拿 0 当 thread 去读 off_thread_t_tro(=0x388) → 3105 的 early_kread 遇非法地址
-    // 是**原地自旋**（不是返回失败）→ 被系统 watchdog 杀掉进程（设备不重启、也无崩溃日志）。
-    g3105LastStage = @"stage1: kexploit_opa334 (kernel r/w)";
-    NSLog(@"[3105] stage1: kernel r/w via kexploit_opa334 (proc_self/sandbox_escape NOT used)");
-    int kret = t3105_kexploit_opa334();
-    [reasons addObject:[NSString stringWithFormat:@"kernel=kexploit_opa334(%d)", kret]];
+    if (modern) {
+        // iOS 26+：先令牌，再内核兜底
+        ret = ds3105_stage_tokens(reasons, NULL);
+        if (ret == 0) {
+            g3105Ready = YES;
+            g3105LastStage = @"done: userspace tokens (iOS 26+)";
+            if (detail) *detail = [reasons componentsJoinedByString:@" | "];
+            return 0;
+        }
+        NSLog(@"[3105] tokens failed on iOS 26+ (%d) → kernel fallback (may still be insufficient)", ret);
 
-    if (kret == 0) {
-        // ---- 阶段 2：cred 路线逃逸（当年 Filza 那条路成功的那套）----
-        g3105LastStage = @"stage2: cred route escape";
-        NSLog(@"[3105] stage2: cred route escape");
-        NSString *ew = nil;
-        int eret = ds3105_cred_escape(&ew);
-        [reasons addObject:[NSString stringWithFormat:@"escape(%d) %@", eret, ew ?: @""]];
-
-        if (eret == 0 && ds3105_probe_write()) {
+        int kres = ds3105_stage_kernel(reasons);
+        if (kres == 0) {
+            g3105Ready = YES;
+            g3105LastStage = @"done: kernel r/w + cred escape (iOS 26+ fallback)";
+            if (detail) *detail = [reasons componentsJoinedByString:@" | "];
+            return 0;
+        }
+    } else {
+        // iOS 18.x：内核优先（保持 0.7.x 的既有行为），再令牌兜底
+        int kres = ds3105_stage_kernel(reasons);
+        if (kres == 0) {
             g3105Ready = YES;
             g3105LastStage = @"done: kernel r/w + cred escape";
             if (detail) *detail = [reasons componentsJoinedByString:@" | "];
             return 0;
         }
-        if (eret == 0) {
-            [reasons addObject:@"probe: outside-sandbox write failed after escape"];
+
+        int tres = ds3105_stage_tokens(reasons, NULL);
+        if (tres == 0) {
+            g3105Ready = YES;
+            g3105LastStage = @"done: userspace tokens";
+            if (detail) *detail = [reasons componentsJoinedByString:@" | "];
+            return 0;
         }
-    }
-
-    // ---- 阶段 3：备选（纯用户态令牌；18.x 上通常失败，26+ 才可能需要）----
-    g3105LastStage = @"stage3: userspace tokens (fallback)";
-    NSLog(@"[3105] stage3: userspace tokens (fallback)");
-    NSString *up = nil;
-    int upRet = DS3105KernelActivateUserspaceOnly(&up);
-    [reasons addObject:[NSString stringWithFormat:@"tokens(%d) %@", upRet, up ?: @""]];
-
-    if (upRet == 0 && ds3105_probe_write()) {
-        g3105Ready = YES;
-        g3105LastStage = @"done: userspace tokens";
-        if (detail) *detail = [reasons componentsJoinedByString:@" | "];
-        return 0;
     }
 
     g3105LastStage = @"failed: all stages";

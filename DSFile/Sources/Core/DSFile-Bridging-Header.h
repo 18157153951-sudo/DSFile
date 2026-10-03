@@ -9,3 +9,4 @@
 #import "DSProcess.h"
 #import "DSShell.h"
 #import "DSSignatureInfo.h"
+#import "DSAppListBridge.h"

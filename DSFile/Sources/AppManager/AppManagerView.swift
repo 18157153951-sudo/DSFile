@@ -52,12 +52,13 @@ struct AppManagerView: View {
 
     @ViewBuilder
     private var content: some View {
-        if !hasAccess {
-            noAccessState
-        } else if isLoading {
+        // 注意：**不再因为「没权限」就不显示列表**。
+        // 列表现在优先来自 LSApplicationWorkspace（不需要任何权限），
+        // 没权限只影响「能不能读容器内容」，不影响「能不能列出 App」。
+        if isLoading {
             loadingState
         } else if apps.isEmpty {
-            emptyState
+            hasAccess ? emptyState : noAccessState
         } else if filtered.isEmpty {
             noMatchState
         } else {
@@ -67,6 +68,9 @@ struct AppManagerView: View {
 
     private var appList: some View {
         List {
+            if !hasAccess {
+                noAccessBanner
+            }
             Section {
                 ForEach(filtered) { app in
                     NavigationLink(destination: AppManagerDetailView(app: app, onClose: { dismiss() })) {
@@ -76,7 +80,7 @@ struct AppManagerView: View {
                 }
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("共 \(apps.count) 个 App。长按一行可以直接打开它的 .app 目录或数据容器。")
+                    Text("共 \(apps.count) 个 App（列表来源：\(AppScanner.lastReport.sourceDescription)）。长按一行可以直接打开它的 .app 目录或数据容器。")
                     Text("图标优先读包内图标文件，读不到时用系统私有接口；都拿不到就显示占位图标。")
                 }
                 .font(.footnote)
@@ -84,6 +88,19 @@ struct AppManagerView: View {
         }
         .listStyle(.insetGrouped)
         .refreshable { load(force: true) }
+    }
+
+    /// 没有文件系统访问时也要把话说清：**能看列表 ≠ 能读容器内容**。
+    private var noAccessBanner: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("App 列表来自系统接口（不需要权限）", systemImage: "list.bullet.rectangle")
+                    .font(.footnote.weight(.semibold))
+                Text("名字、图标、容器路径都能显示。但读取容器里的文件需要先激活访问：点进目录若提示读不到，请到「设置」页激活，或换一个可用的访问路径。")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+        }
     }
 
     private var loadingState: some View {
@@ -185,10 +202,8 @@ struct AppManagerView: View {
 
     private func prepare() {
         hasAccess = EnvironmentProbe.hasFileSystemAccess()
-        guard hasAccess else {
-            isLoading = false
-            return
-        }
+        // 以前这里「没权限就直接 return」，导致未激活时永远看到空白 ✗。
+        // 现在列表由 LSApplicationWorkspace 提供（不需要权限），所以**总是加载**。
         load(force: false)
     }
 

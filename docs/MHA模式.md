@@ -175,3 +175,21 @@ PoC 原文第一句：**“MobileContainerManager trusted the caller's CodeDirec
 
 激活结束时日志会写一行 `✅ 本次实际路径 = MHA · 零内核` 或 `✅ 本次实际路径 = 内核 + cred 逃逸（FilzaJailedDS）`；设置页顶部也会显示「当前生效路径」，未激活时显示「尚未激活」。失败时则会写 `❌ 激活未成功（结果码 …）；访问路径选择 = …`，并附上 MHA 的失败原因。
 
+---
+
+## 11. MHA 在各系统版本上的角色（0.8.0 起写进日志）
+
+依据 3105 自己的文件（不是推断）：
+
+- `README.3105.md` 的兼容表里 **只有 iOS 17 / 18 两行带 `(kernel exploit)`**，26/27 那几行**没有**；
+- `helpers/KernelExploit.swift`：`requiresSandboxEscape = majorVersion >= 26`，且注释写明 iOS < 26 时「拿到内核 R/W 就算 Active，文件浏览退回 `LSApplicationWorkspace` + inode walk」。
+
+所以：
+
+| 系统 | MHA 的角色 | 说明 |
+| --- | --- | --- |
+| **iOS 18.x** | **可选**（不是必需） | 18.x 上内核那条路可用（3105 / FilzaSlop 都用它，我们的 cred 逃逸也验证通过）；MHA 是「零内核」的更稳替代。启用 `myfilza-mha.ipa` 且签名 identifier 正确时它就能接管；签名不匹配时自动回退内核（「自动」模式） |
+| **iOS 26 / 27** | **必需**（首选） | 那两代没有可用的内核链，`bad_query` / MHA / class-13 才是主力；3105 模式的顺序是 MHA → bad_query → 内核兜底 |
+
+真机实测（iPhone13,4 / iOS 18.5）：MCM 桥可用 ✓、租约能激活 ✓、能读到自己那个容器 ✓ —— 只因为签名 identifier 被签名工具自动生成成了别的值（`app.lemon4360.cassava3192`），MCM 才不肯给别人的容器。**机制本身是通的**，卡的是签名身份。
+
