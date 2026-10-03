@@ -43,11 +43,17 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.6.2"
+    private static let appVersion = "0.7.2"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.7.2", date: "2026-10-04", items: [
+            "**补上 MHA 路径缺的第②步**：以前只把 Bundle ID 改成 `com.apple.mobile.MobileHouseArrest`（第①步：拿到特权沙盒 profile），但没有向 MCM **索取容器租约**，所以看不到别的 App 容器 —— 现在会主动枚举容器标识并逐个取租约、激活沙盒扩展",
+            "**严格按上游 PoC 的请求序列实现**（`0xjohnnydev/FilzaSlop` 与 `MobileHouseArrest-PoC`）：`container_query_create` → `set_class`（2 = App 数据容器，7 = App Group）→ `set_identifiers`（目标 bundle id）→ `operation_set_flags(0x900000000)` → `get_single_result` → 取沙盒令牌 → 激活扩展",
+            "**租约持有 = 权限常在**：容器对象被持有不释放，沙盒扩展就不会被撤销（上游文档明确写了 `container_object_free` 会撤销扩展）；整个过程**不执行任何内核代码**",
+            "**诊断一次到位**：自身 bundle id、MCM 桥是否可用（缺哪个符号）、每个容器的激活结果、读/写探针结果，全部写进日志"
+        ]),
         ChangeEntry(version: "0.6.2", date: "2026-10-04", items: [
             "**3105 模式的「取 socket 对象」改成自定位**：不再假定 `pcb + 0x40` 就一定是 socket —— 真机日志显示这个偏移读出来不是内核指针（而 3105 的读原语本身是好的：它读内核基址能拿到完整 64 位值）",
             "**候选偏移逐个试、用强校验自动选对**：对 `inpcb → socket` 试一组候选偏移（表里的值优先，然后 0x38/0x48/0x50/0x30/0x58/0x28/0x60/0x68/0x70/0x20/0x78）；每一对候选 socket 都用「两个 socket 的 `so_cred` 指向同一对象 + `cr_uid` 等于本进程 uid」验证，哪组通过就用哪组",

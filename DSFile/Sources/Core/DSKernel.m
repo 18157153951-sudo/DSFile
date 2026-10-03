@@ -40,6 +40,7 @@
 #import "kexploit/offsets.h"           // off_proc_p_pid 等
 #import "DSCredEscape.h"               // cred 路线的逃逸 / 提权（不调用 proc_self / 上游 sandbox_escape）
 #import "DS3105Kernel.h"              // 3105 模式：完全独立的第二个内核后端，只在被选中时使用
+#import "DSMHAKernel.h"               // MHA 身份（零内核）：MCM 容器租约，只在 bundle id 就是 MHA 时尝试
 #import "patchfinder.h"                // init_xpf（保留上游 XPF 能力，见下）
 #import "machine_info.h"               // CPU 家族宏
 
@@ -323,7 +324,7 @@ static uint32_t ds_cpu_family(void)
 + (BOOL)isEscaped { return gEscaped; }
 + (BOOL)isExploitDone { return gExploitDone; }
 + (BOOL)isRunningAsRoot { return getuid() == 0; }
-+ (BOOL)probeFilesystemAccess { return ds_probe_write_access(); }
++ (BOOL)probeFilesystemAccess { return ds_probe_write_access() || DSMHAActivatedLeaseCount() > 0; }
 + (unsigned long long)kernelBase { return (unsigned long long)g_kernel_base; }
 
 + (NSString *)diagnosticsText
@@ -424,6 +425,54 @@ static uint32_t ds_cpu_family(void)
     return DSKernelResultExploitFailed;
 }
 
+/// MHA 身份路径（零内核）：只有本 App 的 bundle id 就是
+/// `com.apple.mobile.MobileHouseArrest` 时才尝试。它走 MCM 容器租约
+/// （枚举容器标识 → 逐个取租约并激活 → 真实探针），**完全不执行内核代码**。
+///
+/// 与 3105 / FilzaJailedDS 两条路径**完全独立**：不共用原语、不共享就绪标志，
+/// 只复用「沙盒外写探针」和统一的状态通知。失败由调用方继续按用户选择的模式走（不阻断）。
++ (DSKernelResult)ds_activateMHAWithLog:(DSKernelLogBlock)log
+{
+    if (gEscaped) {
+        if (log) log(@"[myfilza] 本进程已具备沙盒外访问，跳过 MHA 路径");
+        return DSKernelResultAlreadyActive;
+    }
+
+    if (log) {
+        log(@"[myfilza] 检测到 MHA 身份：bundle id = com.apple.mobile.MobileHouseArrest");
+        log(@"[myfilza] 尝试 MCM 容器租约（零内核：不执行任何内核代码、不调用 proc_self/sandbox_escape）…");
+    }
+
+    NSString *detail = nil;
+    int ret = 1021;
+    @try {
+        ret = DSMHAKernelActivate(&detail);
+    } @catch (NSException *e) {
+        detail = [NSString stringWithFormat:@"MHA 路径抛出异常：%@", e.reason];
+        ret = 1021;
+    }
+    ds_breadcrumb_write("[myfilza] MHA 路径返回 %d（阶段：%s）\n", ret, DSMHALastStage().UTF8String);
+
+    if (ret == 0) {
+        gExploitDone = YES;
+        // 成功判据：容器租约已激活并持有（普通文件 API 可用）**或**沙盒外写探针通过
+        gEscaped = ds_probe_write_access() || DSMHAActivatedLeaseCount() > 0;
+        if (log) log([NSString stringWithFormat:@"[myfilza] %@", detail ?: @"MHA 路径完成"]);
+        if (gEscaped) {
+            if (log) log(@"[myfilza] *** 沙盒逃逸成功（MHA 身份 · 零内核）：容器租约已生效，"
+                          @"现在可以读写其它 App 的容器 ***");
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"myfilza.fileSystemAccessChanged" object:nil];
+            return DSKernelResultOK;
+        }
+        if (log) log(@"[myfilza] MHA 租约已激活，但沙盒外写探针失败——仍需内核路径");
+        return DSKernelResultEscapeFailed;
+    }
+
+    if (log) log([NSString stringWithFormat:@"[myfilza] MHA 路径未成功（阶段：%@）：%@",
+                  DSMHALastStage(), detail ?: @"未提供原因"]);
+    return DSKernelResultExploitFailed;
+}
+
 + (DSKernelResult)activateWithLog:(DSKernelLogBlock)log
 {
     @synchronized (self) {
@@ -438,9 +487,17 @@ static uint32_t ds_cpu_family(void)
     @try {
         if (log) ds_capture_start(log);
 
-        // === 唯一分派点：选了 3105 就整条走 3105 的独立路径，绝不进入下面的 FilzaJailedDS 逻辑 ===
+        // === 分派点 1：MHA 身份（零内核）优先。只有 bundle id 就是 MHA 时才尝试；
+        //     成功即采用它的结果；失败**不阻断**，继续走下面的模式选择。 ===
+        DSKernelResult mhaResult = DSKernelResultInternalError;
+        if (DSMHAIsHost()) {
+            mhaResult = [self ds_activateMHAWithLog:log];
+        }
+        if (mhaResult == DSKernelResultOK || mhaResult == DSKernelResultAlreadyActive) {
+            result = mhaResult;
+        // === 分派点 2：选了 3105 就整条走 3105 的独立路径，绝不进入下面的 FilzaJailedDS 逻辑 ===
         // （未选中时这个 if 恒为假，下面的代码与 0.4.0 逐字一致）
-        if (DS3105KernelSelected()) {
+        } else if (DS3105KernelSelected()) {
             result = [self ds_activate3105WithLog:log];
         } else if (DSSafeModeEnabled()) {
             // 安全模式：FilzaJailedDS 整体依赖内核漏洞，按用户设置阻止执行。
