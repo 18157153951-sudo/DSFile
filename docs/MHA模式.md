@@ -71,3 +71,46 @@ eSign 签名界面里有「Bundle ID」一栏，把它改成 `com.apple.mobile.M
 | **MHA 身份** | **否** | 只要能装 MHA 变体包，18.x 上也能直接访问容器 |
 
 三种模式**互不影响**：MHA 走的是身份，前两种走的是内核，代码在仓库里彼此隔离。
+
+## 7. 第②步：向 MCM 索取容器租约（0.7.2 起）
+
+**只改 Bundle ID 是不够的** —— 那只是第①步（拿到特权沙盒 profile，可以写 `/private/var/mobile`）。
+**别的 App 的容器**需要第②步：主动向 MCM 查询该容器的**标识**，拿到可读可写的沙盒扩展并激活。
+
+上游 PoC（`0xjohnnydev/MobileHouseArrest-PoC`、`0xjohnnydev/FilzaSlop`）给出的请求序列：
+
+```objc
+container_query_t query = container_query_create();
+container_query_set_class(query, 2);                   // 2 = App 数据容器；7 = App Group
+container_query_operation_set_flags(query, 0x900000000);
+container_query_set_identifiers(query, xpc_string_create("<目标 bundle id>"));
+container_query_operation_set_part(query, 0);           // iOS 18 可能没有这个符号 → 跳过
+container_object_t object = container_query_get_single_result(query);
+container_copy_sandbox_token(object);                   // 取令牌
+container_object_sandbox_extension_activate(object, false);   // 激活扩展
+```
+
+- 实现位置：`DSFile/Sources/Core/DSMCMBridge.{h,m}`（符号全部 `dlopen`/`dlsym`，不直接链接私有库）
+  ＋ `DSFile/Sources/Core/DSMHAKernel.{h,m}`（枚举 → 逐个取租约并**持有** → 真实探针）；
+- `DSKernel.m` 的分派点是 **MHA 优先**，失败**不阻断**，继续按用户选择的模式走；
+- **租约必须持有**：`container_object_free` 会**撤销**扩展（上游文档明确写了），所以租约对象不能提前释放；
+- **枚举不需要权限**：用 `flags = 0x100000000`（仅元数据）就能列出所有 App 数据容器的标识 —— 这样"没权限时怎么列出 App"就解决了；
+- class 13（MobileGestalt）路线在 **18.x 不支持**（PoC 测试表），本项目不采用。
+
+## 8. 签名要求（决定这条路径能不能生效）
+
+PoC 原文第一句：**“MobileContainerManager trusted the caller's CodeDirectory identifier as an authorization key.”**
+
+也就是：**除了 `CFBundleIdentifier`，签名时的 CodeDirectory identifier 也必须是 `com.apple.mobile.MobileHouseArrest`**。
+
+| 证书类型 | CodeDirectory identifier | 结果 |
+| --- | --- | --- |
+| 免费 / 个人 Apple ID | 通常是 `<TeamID>.<bundleid>` | ❌ 不匹配（还可能直接报 9400/9401） |
+| 付费开发者证书 / 企业证书 | 可以就是 `com.apple.mobile.MobileHouseArrest` | ✅ 可用 |
+
+用 eSign 签名时**不要让它改写 Bundle ID**（有些工具会"顺手"加后缀），并确保 identifier 就是该值。
+
+排查（日志里都有）：
+- 所有容器 `activate` 全失败 → 多半是 **identifier 不匹配**；
+- 写 `/var/mobile` 探针失败 → 多半是**特权 profile 没下来**（签名/安装方式问题）；
+- 提示 `MCM 桥不可用` → 日志会直接列出缺哪个私有符号。
