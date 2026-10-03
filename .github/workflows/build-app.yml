@@ -82,14 +82,22 @@ jobs:
           /usr/bin/plutil -replace CFBundleIdentifier -string 'com.apple.mobile.MobileHouseArrest' Payload-mha/myfilza.app/Info.plist
           /usr/bin/plutil -replace CFBundleDisplayName -string 'myfilza MHA' Payload-mha/myfilza.app/Info.plist
           /usr/bin/plutil -replace CFBundleName -string 'myfilzaMHA' Payload-mha/myfilza.app/Info.plist
-          # 关键：IPA 的顶层目录必须叫 Payload/，否则签名工具会报「未找到 .app」
-          # （之前这里直接 zip Payload-mha，导致变体包顶层是 Payload-mha/ 而无法导入）
+          # 关键：IPA 的顶层目录必须叫 Payload/，且里面**只能是 MHA 那个 App**。
+          # 注意：不能只写 `mv Payload-mha Payload` —— Payload 已存在时会被移进它里面，
+          # 结果顶层还是常规包、MHA 包被塞到 Payload/Payload-mha/（已踩过）。先删再改名。
+          rm -rf Payload
           mv Payload-mha Payload
           zip -qry myfilza-mha.ipa Payload
           echo "== 校验 MHA 变体的 IPA 结构 =="
-          unzip -l myfilza-mha.ipa | head -8
+          unzip -l myfilza-mha.ipa
           unzip -l myfilza-mha.ipa | grep -q 'Payload/myfilza.app/' \
             || { echo 'MHA 变体包结构错误：顶层不是 Payload/'; exit 1; }
+          if unzip -l myfilza-mha.ipa | grep -q 'Payload-mha'; then
+            echo 'MHA 变体包结构错误：混入了 Payload-mha/'; exit 1
+          fi
+          /usr/bin/plutil -extract CFBundleIdentifier raw Payload/myfilza.app/Info.plist \
+            | grep -q '^com.apple.mobile.MobileHouseArrest$' \
+            || { echo 'MHA 变体包错误：顶层 App 的 bundle id 不是 MHA'; exit 1; }
           ls -lh DSFile.ipa myfilza-mha.ipa
           echo "常规 SHA256: $(shasum -a 256 DSFile.ipa | awk '{print $1}')"
           echo "MHA  SHA256: $(shasum -a 256 myfilza-mha.ipa | awk '{print $1}')"
