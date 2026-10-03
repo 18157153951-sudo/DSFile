@@ -26,9 +26,25 @@ targets:
       # 与上面 FilzaJailedDS **完全隔离**：自带一份同名的 kexploit/krw 实现，
       # 其自有符号经 DS3105SymbolPrefix.h 统一改名 t3105_*，因此两者可共存于同一可执行文件。
       # 源码逐字节原样（来源与许可证 GPL-3.0 见 Vendor/ThreeOneOSFive/{LICENSE,THIRD_PARTY_NOTICES.md}）。
-      - path: Vendor/ThreeOneOSFive/exploit
+# 注意：compilerFlags 只在**文件级** source 生效，目录级会被 XcodeGen 忽略（第一次 CI 因此出现重复符号）。
+# 所以这里逐个文件列出；源码本身仍逐字节原样，没有改动。
+      - path: Vendor/ThreeOneOSFive/exploit/bad_query.c
         compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
-      - path: Vendor/ThreeOneOSFive/kexploit
+      - path: Vendor/ThreeOneOSFive/exploit/mcm_bridge.m
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
+      - path: Vendor/ThreeOneOSFive/exploit/wallpaper_zip.c
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
+      - path: Vendor/ThreeOneOSFive/kexploit/kexploit_opa334.m
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
+      - path: Vendor/ThreeOneOSFive/kexploit/krw.m
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
+      - path: Vendor/ThreeOneOSFive/kexploit/kutils.m
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
+      - path: Vendor/ThreeOneOSFive/kexploit/offsets.m
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
+      - path: Vendor/ThreeOneOSFive/kexploit/sandbox_escape.m
+        compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
+      - path: Vendor/ThreeOneOSFive/kexploit/vnode.m
         compilerFlags: -include $(SRCROOT)/Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h
     info:
       path: Sources/Info.plist
