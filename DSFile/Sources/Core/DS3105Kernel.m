@@ -19,6 +19,7 @@
 #import "../../Vendor/ThreeOneOSFive/DS3105SymbolPrefix.h"   // 必须最先：把 3105 自有符号改名 t3105_*
 
 #import "../../Vendor/ThreeOneOSFive/kexploit/kexploit_opa334.h"
+#import "../../Vendor/ThreeOneOSFive/kexploit/offsets.h"      // off_* 全局量（前缀头会改名成 t3105_off_*）
 #import "../../Vendor/ThreeOneOSFive/kexploit/kutils.h"
 #import "../../Vendor/ThreeOneOSFive/kexploit/sandbox_escape.h"
 #import "../../Vendor/ThreeOneOSFive/exploit/bad_query.h"
@@ -35,6 +36,11 @@
 NSString * const DSKernelBackendDefaultsKey = @"myfilza.kernelBackend";
 NSString * const DSKernelBackendValueFilza  = @"filzajailedds";
 NSString * const DSKernelBackendValue3105   = @"3105";
+
+/// 3105 的 kexploit_opa334.m 里定义了这两个 socket pcb 全局量，但上游没有在头文件里声明它们。
+/// 前缀头会把它们改名成 t3105_*（本文件已包含前缀头，这里直接写 t3105_ 名字，避免宏二次替换）。
+extern uint64_t t3105_rwSocketPcb;
+extern uint64_t t3105_controlSocketPcb;
 
 /// 3105 侧状态：与现有后端的 gEscaped 完全独立
 static BOOL      g3105Ready      = NO;
