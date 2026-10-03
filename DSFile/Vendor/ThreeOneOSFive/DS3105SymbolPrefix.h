@@ -229,4 +229,9 @@
 #define wiredPageMarker t3105_wiredPageMarker
 #define writeFd t3105_writeFd
 
+/* CI 实测补充（这些是 3105 自己的全局量，与现有后端同名） */
+#define iov t3105_iov
+#define VM_MAX_KERNEL_ADDRESS t3105_VM_MAX_KERNEL_ADDRESS
+#define VM_MIN_KERNEL_ADDRESS t3105_VM_MIN_KERNEL_ADDRESS
+
 #endif /* DS3105_SYMBOL_PREFIX_H */
