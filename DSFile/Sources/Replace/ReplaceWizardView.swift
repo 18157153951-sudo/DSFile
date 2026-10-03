@@ -1495,8 +1495,9 @@ struct ReplaceWizardView: View {
                 let summary = (note.userInfo?["summary"] as? String) ?? ""
                 RunStore.shared.reload()
                 model.reloadSavedTasks()
-                model.append("替换任务：\(success ? "成功" : "未成功") · \(summary)",
-                             success ? .success : .warning)
+                let stateText: String = success ? "成功" : "未成功"
+                let stateLevel: ReplaceWizardModel.LogLine.Level = success ? .success : .warning
+                model.append("替换任务：\(stateText) · \(summary)", stateLevel)
             }
             .onReceive(NotificationCenter.default.publisher(for: .myfilzaFileSystemAccessChanged)) { _ in
                 // 激活成功 / 提权成功：权限变了，之前那次「没权限」的扫描结果必须作废重扫
