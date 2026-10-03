@@ -48,18 +48,32 @@ jobs:
           lipo -info "$DYLIB"
           echo "== 依赖（应只有系统库） =="
           otool -L "$DYLIB"
-          echo "== 关键符号 =="
-          for SYMBOL in _MyfilzaReplaceDylibInit _OBJC_CLASS_\$_MyfilzaReplaceLauncher _OBJC_CLASS_\$_DSKernel _OBJC_CLASS_\$_DSPickers; do
-            if nm -gU "$DYLIB" 2>/dev/null | grep -q "$SYMBOL"; then
+          if otool -L "$DYLIB" | tail -n +2 | grep -v -E '/usr/lib/|/System/Library/' | grep -v 'MyfilzaReplace.dylib'; then
+            echo "❌ 出现了非系统库依赖"; exit 1
+          fi
+          echo "== ObjC 类符号 =="
+          SYMS=$(nm -gU "$DYLIB")
+          for SYMBOL in '_OBJC_CLASS_$_DSKernel' '_OBJC_CLASS_$_DSPickers' '_OBJC_CLASS_$_DSProcess' '_OBJC_CLASS_$_DSShell' 'MyfilzaReplaceLauncher'; do
+            if echo "$SYMS" | grep -q "$SYMBOL"; then
               echo "✅ 找到 $SYMBOL"
             else
-              echo "❌ 缺少 $SYMBOL"
-              nm -gU "$DYLIB" 2>/dev/null | head -60
-              exit 1
+              echo "❌ 缺少 $SYMBOL"; echo "$SYMS" | head -40; exit 1
             fi
           done
-          echo "== 确认没有内核代码被带进来（应全部为空） =="
-          nm -gU "$DYLIB" 2>/dev/null | grep -E 'kexploit|early_kread|DSCredEscape|DS3105|clearsword' || echo "（无内核符号，符合预期）"
+          echo "== 确认替换向导真的被编进来了（按向导专属文案找） =="
+          for TEXT in '添加目标文件' '多出来的文件' '一键回滚'; do
+            if strings -a "$DYLIB" | grep -q "$TEXT"; then
+              echo "✅ 含向导文案：$TEXT"
+            else
+              echo "❌ 找不到向导文案：$TEXT"; exit 1
+            fi
+          done
+          echo "== 确认没有内核代码被带进来（应为空） =="
+          if nm -gU "$DYLIB" 2>/dev/null | grep -E 'kexploit|early_kread|DSCredEscape|DS3105|clearsword'; then
+            echo "❌ 发现内核符号（注入版不应包含）"; exit 1
+          else
+            echo "（无内核符号，符合预期）"
+          fi
 
       - name: 计算校验值并打包
         working-directory: InjectDylib
