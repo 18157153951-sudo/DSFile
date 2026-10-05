@@ -15,6 +15,10 @@ name: Build Jailbreak Deb
 #   · "roothide's bootstrap uses jbroot as the default root" → 包内路径按 jbroot 相对写
 #   所以 deb 的 data 布局用 ./Applications/myfilza.app/...（装完即 <jbroot>/Applications/...），
 #   并且 dpkg 安装时会在 app 目录里生成 .jbroot 符号链接 —— 我们的 jbroot 解析正是靠它。
+#
+# 0.9.1：越狱版改用**独立 bundle id** `com.dsfile.app.jb`（侧载版仍是 com.dsfile.app）。
+#   起因（真机）：0.9.0 两个版本共用 com.dsfile.app，装上去互相顶、日志也分不清谁在跑。
+#   显示名保持 `myfilza JB`，并在 CI 里自检（改完必须是 .jb，否则构建失败）。
 
 on:
   push:
@@ -71,8 +75,17 @@ jobs:
           BIN="$APP/myfilza"
           test -f "$BIN" || { echo "❌ 找不到可执行文件 $BIN"; exit 1; }
 
-          # 显示名区分开：同一个 bundle id 的侧载版叫 myfilza，越狱版叫 myfilza JB
+          # 显示名区分开：越狱版叫 myfilza JB
           /usr/bin/plutil -replace CFBundleDisplayName -string 'myfilza JB' "$APP/Info.plist" || true
+          /usr/bin/plutil -replace CFBundleName -string 'myfilzaJB' "$APP/Info.plist" || true
+          # ★ bundle id 必须与侧载版**不同**：0.9.0 时两边都是 com.dsfile.app，
+          #   结果装上去互相顶、日志也分不清谁在跑（真机踩过）。越狱版固定用 .jb 后缀。
+          /usr/bin/plutil -replace CFBundleIdentifier -string 'com.dsfile.app.jb' "$APP/Info.plist"
+          echo "== 自检：越狱版 bundle id 必须是 com.dsfile.app.jb =="
+          JB_ID="$(/usr/bin/plutil -extract CFBundleIdentifier raw "$APP/Info.plist")"
+          echo "CFBundleIdentifier = $JB_ID"
+          [ "$JB_ID" = 'com.dsfile.app.jb' ] \
+            || { echo "❌ 越狱版 bundle id 不是 com.dsfile.app.jb（当前=$JB_ID）—— 会和侧载版互相顶"; exit 1; }
 
           cat > entitlements.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -105,19 +118,28 @@ jobs:
           echo "== 架构 =="
           lipo -info "$BIN"
           echo "== bundle id / 显示名 =="
-          /usr/bin/plutil -p "$APP/Info.plist" | grep -E 'CFBundleIdentifier|CFBundleDisplayName'
+          /usr/bin/plutil -p "$APP/Info.plist" | grep -E 'CFBundleIdentifier|CFBundleDisplayName|CFBundleName'
 
       - name: 打包 .deb（rootless / roothide 规范：./Applications/...）
         working-directory: DSFile
         run: |
           set -e
-          VERSION=0.9.0
+          VERSION=0.9.1
           APP=build/Release-iphoneos/myfilza.app
           PKG=debroot
           rm -rf "$PKG" debian-binary control.tar.gz data.tar.gz ./*.deb
 
           mkdir -p "$PKG/Applications" "$PKG/DEBIAN"
           cp -R "$APP" "$PKG/Applications/"
+
+          # 自检：装进 deb 的必须是越狱版 bundle id，且显示名是 myfilza JB
+          PKG_ID="$(/usr/bin/plutil -extract CFBundleIdentifier raw "$PKG/Applications/myfilza.app/Info.plist")"
+          PKG_NAME="$(/usr/bin/plutil -extract CFBundleDisplayName raw "$PKG/Applications/myfilza.app/Info.plist")"
+          echo "deb 内 App: bundle id=$PKG_ID  显示名=$PKG_NAME"
+          [ "$PKG_ID" = 'com.dsfile.app.jb' ] \
+            || { echo "❌ deb 里的 bundle id 不是 com.dsfile.app.jb（当前=$PKG_ID）"; exit 1; }
+          [ "$PKG_NAME" = 'myfilza JB' ] \
+            || { echo "❌ deb 里的显示名不是 myfilza JB（当前=$PKG_NAME）"; exit 1; }
 
           cat > "$PKG/DEBIAN/control" <<EOF
           Package: com.dsfile.myfilza
@@ -133,6 +155,8 @@ jobs:
            越狱模式专用包：装进 <jbroot>/Applications/，带 platform-application 沙盒例外，
            不跑任何内核漏洞即可读写系统路径与其它 App 容器。
            TrollStore 安装的 App 在 roothide 下不会获得越狱权限，所以需要这个包。
+           本包 bundle id = com.dsfile.app.jb（侧载版是 com.dsfile.app，两个 App 互不影响）；
+           安装前建议先卸载侧载版，避免桌面上出现两个 myfilza。
           EOF
 
           cat > "$PKG/DEBIAN/postinst" <<'EOF'
@@ -182,6 +206,10 @@ jobs:
             tar tzf data.tar.gz | grep -q 'Applications/myfilza.app/myfilza' \
               || { echo '❌ data.tar.gz 里没有 Applications/myfilza.app/myfilza'; exit 1; }
           fi
+          echo "--- deb 里的 bundle id（必须是 com.dsfile.app.jb）---"
+          /usr/bin/plutil -extract CFBundleIdentifier raw "$PKG/Applications/myfilza.app/Info.plist"
+          [ "$(/usr/bin/plutil -extract CFBundleIdentifier raw "$PKG/Applications/myfilza.app/Info.plist")" = 'com.dsfile.app.jb' ] \
+            || { echo '❌ deb 里的 bundle id 不是 com.dsfile.app.jb'; exit 1; }
           echo "SHA256: $(shasum -a 256 "$DEB" | awk '{print $1}')"
 
       - name: 上传 .deb

@@ -362,13 +362,18 @@ int DSJailbreakActivate(NSString *_Nullable *_Nullable detail)
         [reasons addObject:
             @"检测到 TrollStore 安装，但本 App 仍读不到系统路径 —— roothide 下 TrollStore 安装的 App "
             @"**不会**获得越狱权限（roothide 的设计就是让 App 看不到越狱）。"
-            @"请改用**越狱版（.deb）**安装：用 Sileo / Zebra 安装 myfilza 的 deb 包"
-            @"（会装到 <jbroot>/Applications/，带 platform-application 沙盒例外），"
-            @"或把「访问路径」改成「仅内核」/「自动」走内核那条。"];
+            @"要做的事：**先卸载 TrollStore 装的 myfilza（侧载版）**，"
+            @"再用 Sileo / Zebra 安装 myfilza_0.9.1_iphoneos-arm64.deb（桌面名 myfilza JB）"
+            @"—— 越狱版 bundle id 是 com.dsfile.app.jb，和侧载版的 com.dsfile.app 是两个 App，"
+            @"不先卸掉侧载版的话桌面上会同时出现两个 myfilza、日志也分不清谁在跑。"
+            @"装到 <jbroot>/Applications/ 后会带 platform-application 沙盒例外，越狱模式即可读写全盘。"
+            @"（不想装 deb 的话，把「访问路径」改成「仅内核」/「自动」走内核那条。）"];
     } else if (looksJB) {
         [reasons addObject:
             @"检测到越狱特征，但本 App 仍受沙盒限制 —— 本 App 没有被授予沙盒例外。"
-            @"请改用**越狱版（.deb）**安装（装进 <jbroot>/Applications/），"
+            @"要做的事：**先卸载 TrollStore / 侧载装的 myfilza**，"
+            @"再用 Sileo / Zebra 安装 myfilza_0.9.1_iphoneos-arm64.deb（装进 <jbroot>/Applications/，"
+            @"越狱版 bundle id = com.dsfile.app.jb，与侧载版是两个 App）；"
             @"或把「访问路径」改成「仅内核」/「自动」走内核那条。"];
     } else {
         [reasons addObject:

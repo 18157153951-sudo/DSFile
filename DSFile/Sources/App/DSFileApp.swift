@@ -30,7 +30,9 @@ struct DSFileApp: App {
                 .environmentObject(kernel)
                 .environmentObject(browser)
                 .onAppear {
-                    DSLog.shared.info("myfilza \(BuildInfo.version) (build \(BuildInfo.stamp)) 启动：\(DSKernel.deviceModelIdentifier()) / iOS \(DSKernel.systemVersion()) / \(DSKernel.cpuFamilyName())", source: "启动")
+                    // 第一行就写清「跑的是哪个版本形态 + bundle id 原文」——
+                    // 侧载版 / MHA 变体 / 越狱版(.deb) 三者长得一样，只有 bundle id 能区分。
+                    DSLog.shared.info("myfilza \(BuildInfo.version) (build \(BuildInfo.stamp)) 启动：\(DSKernel.deviceModelIdentifier()) / iOS \(DSKernel.systemVersion()) / \(DSKernel.cpuFamilyName()) · \(BuildInfo.flavorSummary)", source: "启动")
                     DSLog.shared.info(DSKernel.supportSummary(), source: "启动")
                     // 签名标识诊断（只读）：MCM 的授权键是签名里的 CodeDirectory identifier，
                     // 只改 Info.plist 的 bundle id 是不够的。拿不到就如实说拿不到，绝不影响激活。

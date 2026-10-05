@@ -407,7 +407,7 @@ App 在设备上的数据目录（都是 App 自己的 Documents，可以在「�
 
 ---
 
-## 十三、0.9.0：越狱模式（零漏洞）+ 越狱版 `.deb`
+## 十三、0.9.x：越狱模式（零漏洞）+ 越狱版 `.deb`
 
 真机背景：**iPad13,4 / iOS 16.4.1 / roothide 越狱 / App 是 TrollStore 安装的**，
 上报「没能正常获取权限」，日志里 `TeamIdentifier = TROLLTROLL`（TrollStore 实锤）、
@@ -441,14 +441,34 @@ App 在设备上的数据目录（都是 App 自己的 Documents，可以在「�
 
 ### 3）越狱版 `.deb`（CI 产出）
 
-`myfilza_0.9.0_iphoneos-arm64.deb`（workflow `Build Jailbreak Deb`）：
+`myfilza_0.9.1_iphoneos-arm64.deb`（workflow `Build Jailbreak Deb`）：
 
-- 编译出 `myfilza.app` 后用 **`ldid`** 注入 `platform-application=true`、
+- 编译出 `myfilza.app` 后把 **bundle id 改成 `com.dsfile.app.jb`**、显示名改成 `myfilza JB`
+  （0.9.1 起越狱版是**独立 App**；0.9.0 时与侧载版共用 `com.dsfile.app`，装上去会互相顶 —— 真机踩过）；
+- 用 **`ldid`** 注入 `platform-application=true`、
   `com.apple.private.security.container-required=false`、`no-sandbox=true`、`get-task-allow=true`，
   并**校验签名里确实带上了**（否则 CI 直接失败）；
 - 按 rootless / roothide 规范打包：`data.tar` 布局是 `./Applications/myfilza.app/...`
   （roothide 的 bootstrap 以 jbroot 为根，所以装完就是 `<jbroot>/Applications/myfilza.app`）；
 - `postinst` 调 `uicache -a`（回退 `uicache -p /Applications/myfilza.app`）刷新桌面图标；
-- **安装**：用 **Sileo / Zebra** 添加本地源或直接安装这个 deb（不要用 TrollStore / AltStore —— 那些装出来的 App 在 roothide 下仍然被沙盒关着）。
+- CI 里还会自检 deb 内的 bundle id 必须是 `com.dsfile.app.jb`、显示名必须是 `myfilza JB`（否则构建失败）；
+- **安装顺序**：**先卸载 TrollStore / 侧载装的 `myfilza`**，再用 **Sileo / Zebra** 安装这个 deb
+  → 桌面出现 `myfilza JB` → 打开后把「访问路径」设为「仅越狱」（或「自动」）。
+  （不要用 TrollStore / AltStore 装这个包 —— 那些装出来的 App 在 roothide 下仍然被沙盒关着。）
+
+### 4）0.9.1：越狱版独立 bundle id + 「版本形态」一眼可辨
+
+真机反馈：0.9.0 的越狱版与侧载版**共用** `com.dsfile.app`，装上去互相顶、日志也分不清谁在跑。0.9.1 改掉：
+
+| 版本形态 | bundle id | 怎么装 |
+| --- | --- | --- |
+| 侧载版 | `com.dsfile.app` | eSign / 证书重签 IPA |
+| MHA 变体 | `com.apple.mobile.MobileHouseArrest` | eSign 重签（签名 identifier 也要保持该值） |
+| **越狱版(.deb)** | **`com.dsfile.app.jb`** | **Sileo / Zebra** 装 `.deb` |
+
+- **启动日志第一行**直接写清本次跑的是哪个：
+  `… · 版本形态 = 越狱版(.deb)（bundle id = com.dsfile.app.jb）`；
+- 设置页「关于 → 版本形态」同样显示，不用翻日志；
+- 「仅越狱」失败时的指引也改了：**先卸载 TrollStore 装的侧载版 myfilza**，再装 `myfilza_0.9.1_iphoneos-arm64.deb`。
 
 作者：端木awa
