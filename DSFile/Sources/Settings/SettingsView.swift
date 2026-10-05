@@ -61,7 +61,7 @@ struct SettingsView: View {
             "**修「装完桌面没图标」的主因**：`uicache` 在 `postinst` 里因为 PATH 里没有它而**静默失败**（旧写法 `uicache -a ... || true`）—— 两条安装路都改成**绝对路径 + 多路尝试 + 每一步打印命令与退出码**（`<jbroot>/usr/bin/uicache`、`/usr/bin/uicache`、`/bin/uicache`；参数 `-a` / `--all` / `-p <app>`）",
             "**补 roothide 机制要求的 `.jbroot` 符号链接**（含 mach-o 的目录要有 `.jbroot` 指向越狱根；dpkg 一般自动生成，手动安装由脚本创建）—— 缺了它 App 内的「越狱模式」也解析不到 jbroot",
             "**补权限与所有权**：`chown -R 0:0`、目录与可执行文件 `755`，全部打印",
-            "**签名逐条校验**：`ldid -e` 里必须能看到官方四件套，缺任何一项直接失败（不再"装完才发现读不到"）",
+            "**签名逐条校验**：`ldid -e` 里必须能看到官方四件套，缺任何一项直接失败（不再「装完才发现读不到」）",
             "新增 `sh install.sh --check`：只体检、不改动，输出越狱根 / 是否已安装 / `.jbroot` 指向 / 签名关键项 / Info.plist / uicache 可用性"
         ]),
         ChangeEntry(version: "0.9.2", date: "2026-10-05", items: [
