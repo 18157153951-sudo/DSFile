@@ -632,9 +632,9 @@ static uint32_t ds_cpu_family(void)
                     log([NSString stringWithFormat:@"[myfilza] 「仅越狱（直接 POSIX）」失败（阶段：%@）：%@",
                          DSJailbreakLastStage(), gLastJailbreakFailureReason ?: @"未提供原因"]);
                     log(@"[myfilza] 按你的选择**不回退内核**。要让越狱模式生效：① 用 Sileo / Zebra 安装"
-                          "越狱版 deb（myfilza_0.9.2_iphoneos-arm64e.deb，装进 <jbroot>/Applications/，"
-                          "带越狱 entitlements）；② deb 装不上时用手动安装包 myfilza-jb-manual.zip"
-                          "（解压后执行 sh install.sh）；或者把访问路径改成「自动（推荐）」/「仅内核」。");
+                          "越狱版 deb（myfilza_<版本>_iphoneos-arm64e.deb，装进 <jbroot>/Applications/，"
+                          "带越狱 entitlements，装完会自动刷新桌面）；② deb 装不上时用手动安装包 myfilza-jb-manual.zip"
+                          "（解压后只需一条命令 sh install.sh，全自动）；或者把访问路径改成「自动（推荐）」/「仅内核」。");
                 }
                 gLastError = [NSError errorWithDomain:@"myfilza"
                                                  code:DSKernelResultEscapeFailed

@@ -25,6 +25,9 @@ name: Build Jailbreak Deb
 #     apt.tinyapps.Renet-*.deb）：data 布局为 ./Applications/<Name>.app/...，
 #     Architecture 一律 iphoneos-arm64e，postinst 里会 chown/ldid -s/uicache。
 #
+# 0.9.4：安装全自动（装上即用）—— postinst 与 install.sh 一致：
+#        定位 jbroot → .jbroot 链接 → chown/chmod → ldid 重签 → 多路 uicache →
+#        **自动 respring（sbreload → killall -9 SpringBoard → launchctl kickstart）** → 打印结论
 # 0.9.3：postinst 里 uicache 改绝对路径+多路尝试且全部打印；补 .jbroot 符号链接（装完没图标的主因）
 # 0.9.2：
 #   · 架构字段改为 iphoneos-arm64e（并额外产出一个 iphoneos-arm64 变体兜底）
@@ -47,7 +50,7 @@ permissions:
   contents: read
 
 env:
-  VERSION: 0.9.3
+  VERSION: 0.9.4
 
 jobs:
   deb:
@@ -138,13 +141,33 @@ jobs:
           [ "$PKG_ID" = 'com.dsfile.app.jb' ] || { echo "❌ deb 里的 bundle id 不对（$PKG_ID）"; exit 1; }
           [ "$PKG_NAME" = 'myfilza JB' ] || { echo "❌ deb 里的显示名不对（$PKG_NAME）"; exit 1; }
 
-          # postinst：在设备上补一次签名（ldid 是 bootstrap 自带的），再刷新图标
+          # postinst：**装上即用** —— 自动补签名、建 .jbroot 链接、修权限、注册图标、刷新桌面。
+          # 与 jailbreak/install.sh 的行为保持一致（两条安装路等价）。
           cat > debroot/DEBIAN/postinst <<'POSTINST'
           #!/bin/sh
           # roothide/rootless 的 bootstrap 工具只认 jbroot 相对路径：
           # 这里的 /Applications/myfilza.app 就是 <jbroot>/Applications/myfilza.app
-          set -e
+          set -u
           APP=/Applications/myfilza.app
+          LOG() { echo "[myfilza] $*"; }
+
+          # 0) 定位 jbroot（.jbroot 链接要用；dpkg 一般已设置 JBROOT）
+          JB="${JBROOT:-}"
+          if [ -z "$JB" ] && command -v jbroot >/dev/null 2>&1; then JB="$(jbroot / 2>/dev/null || true)"; fi
+          if [ -z "$JB" ]; then
+            for D in /Applications /usr/bin /usr/lib; do
+              if [ -L "$D/.jbroot" ]; then JB="$(readlink "$D/.jbroot" 2>/dev/null || true)"; [ -n "$JB" ] && break; fi
+            done
+          fi
+          if [ -n "$JB" ]; then LOG "jbroot = $JB"; else LOG "未取到 jbroot（dpkg 一般会自动生成 .jbroot）"; fi
+
+          # 1) 权限
+          chown -R 0:0 "$APP" 2>/dev/null || true
+          chmod 755 "$APP" 2>/dev/null || true
+          chmod 755 "$APP/myfilza" 2>/dev/null || true
+          find "$APP" -type d -exec chmod 755 {} \; 2>/dev/null || true
+
+          # 2) 重新签名（安装过程可能丢签名；ldid 是 bootstrap 自带的）
           if command -v ldid >/dev/null 2>&1; then
             cat > /tmp/myfilza-jb-ent.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -161,42 +184,65 @@ jobs:
           </plist>
           PLIST
             ldid -S/tmp/myfilza-jb-ent.plist "$APP/myfilza" 2>/dev/null || true
+            find "$APP" -type f \( -name '*.dylib' -o -path '*.framework/*' \) -print0 2>/dev/null \
+              | xargs -0 -I{} ldid -S/tmp/myfilza-jb-ent.plist "{}" 2>/dev/null || true
+            for K in platform-application com.apple.private.security.no-sandbox \
+                     com.apple.private.security.storage.AppBundles \
+                     com.apple.private.security.storage.AppDataContainers; do
+              if ldid -e "$APP/myfilza" 2>/dev/null | grep -q "$K"; then LOG "  ✓ $K"; else LOG "  ✗ 缺 $K"; fi
+            done
             rm -f /tmp/myfilza-jb-ent.plist
+          else
+            LOG "⚠️ 找不到 ldid，跳过重签（可能仍可运行）"
           fi
-          # 刷新图标：绝对路径 + 多路尝试，且**全部打印**（uicache 静默失败是"装完没图标"的主因）
+
+          # 3) .jbroot 链接（roothide 机制：含 mach-o 的目录要有 .jbroot 指向越狱根）
+          if [ -e "$APP/.jbroot" ]; then
+            LOG ".jbroot 已存在: $(readlink "$APP/.jbroot" 2>/dev/null)"
+          elif [ -n "$JB" ]; then
+            ln -s "$JB" "$APP/.jbroot" 2>/dev/null && LOG ".jbroot -> $JB"
+          else
+            LOG "提示：未取到 jbroot，跳过 .jbroot 创建"
+          fi
+
+          # 4) uicache：绝对路径 + 多路尝试，且**全部打印**（静默失败是"装完没图标"的主因）
           UICOK=0
           for U in /usr/bin/uicache /bin/uicache "$(command -v uicache 2>/dev/null || true)"; do
             [ -n "$U" ] && [ -x "$U" ] || continue
             for A in -a --all; do
-              echo "uicache: $U $A"
+              LOG "uicache: $U $A"
               if "$U" "$A"; then UICOK=1; break; fi
             done
             [ "$UICOK" = "1" ] && break
-            echo "uicache: $U -p $APP"
+            LOG "uicache: $U -p $APP"
             if "$U" -p "$APP"; then UICOK=1; break; fi
           done
-          if [ "$UICOK" = "1" ]; then
-            echo "uicache 成功"
-          else
-            echo "⚠️ uicache 全部失败：桌面可能不出现图标 —— 请执行 sbreload 或 killall -9 SpringBoard"
-          fi
-          # roothide 机制：含 mach-o 的目录应有 .jbroot 符号链接指向越狱根（dpkg 一般会自动生成，缺了就补）
-          if [ -e "$APP/.jbroot" ]; then
-            echo ".jbroot 已存在: $(readlink "$APP/.jbroot" 2>/dev/null)"
-          elif [ -n "${JBROOT:-}" ]; then
-            ln -s "$JBROOT" "$APP/.jbroot" && echo ".jbroot -> $JBROOT"
-          else
-            echo "提示：未设置 JBROOT，跳过 .jbroot 创建（dpkg 一般会自动生成）"
-          fi
+          if [ "$UICOK" = "1" ]; then LOG "uicache 成功"; else LOG "⚠️ uicache 全部失败"; fi
+
+          # 5) 自动刷新桌面（装上即用的关键：不用用户自己 respring）
+          LOG "即将刷新桌面（图标会立刻出现）…"
+          RESPRUNG=0
+          if command -v sbreload >/dev/null 2>&1; then sbreload && RESPRUNG=1; fi
+          if [ "$RESPRUNG" = "0" ] && command -v killall >/dev/null 2>&1; then killall -9 SpringBoard && RESPRUNG=1; fi
+          if [ "$RESPRUNG" = "0" ]; then launchctl kickstart -k system/com.apple.SpringBoard && RESPRUNG=1; fi
+          if [ "$RESPRUNG" = "1" ]; then LOG "桌面已刷新"; else LOG "自动刷新未成功，请手动执行 sbreload"; fi
+
+          LOG "完成：去桌面点「myfilza JB」（默认「自动」模式会优先走越狱路径，无需设置）"
           exit 0
           POSTINST
           chmod 755 debroot/DEBIAN/postinst
 
           cat > debroot/DEBIAN/prerm <<'PRERM'
           #!/bin/sh
-          set -e
-          if command -v uicache >/dev/null 2>&1; then
-            uicache -a >/dev/null 2>&1 || true
+          set -u
+          # 卸载时同步刷新图标与桌面，避免留下"幽灵图标"
+          UICOK=0
+          for U in /usr/bin/uicache /bin/uicache "$(command -v uicache 2>/dev/null || true)"; do
+            [ -n "$U" ] && [ -x "$U" ] || continue
+            if "$U" -a; then UICOK=1; break; fi
+          done
+          if command -v sbreload >/dev/null 2>&1; then sbreload || true
+          elif command -v killall >/dev/null 2>&1; then killall -9 SpringBoard || true
           fi
           exit 0
           PRERM
@@ -237,7 +283,20 @@ jobs:
               echo "❌ $DEB 的路径里出现 rootfs/ —— 会被 dpkg 当成要写真实 rootfs（只读）"
               exit 1
             fi
+            # ③ 安装脚本必须真的自动化（装上即用）：绝对路径 uicache + 自动 respring + .jbroot + ldid
+            rm -rf /tmp/myfilza-deb-ctl
+            dpkg-deb -e "$DEB" /tmp/myfilza-deb-ctl 2>/dev/null
+            grep -q '/usr/bin/uicache' /tmp/myfilza-deb-ctl/postinst \
+              || { echo "❌ $DEB 的 postinst 没有绝对路径 uicache"; exit 1; }
+            grep -q 'sbreload' /tmp/myfilza-deb-ctl/postinst \
+              || { echo "❌ $DEB 的 postinst 没有自动 respring（sbreload）"; exit 1; }
+            grep -q '\.jbroot' /tmp/myfilza-deb-ctl/postinst \
+              || { echo "❌ $DEB 的 postinst 没有创建 .jbroot 链接"; exit 1; }
+            grep -q 'ldid' /tmp/myfilza-deb-ctl/postinst \
+              || { echo "❌ $DEB 的 postinst 没有 ldid 重签"; exit 1; }
+            rm -rf /tmp/myfilza-deb-ctl
             echo "   ✓ 架构字段、文件清单、无 rootfs/ 前缀 全部通过"
+            echo "   ✓ postinst 自检通过（绝对路径 uicache / 自动 respring / .jbroot / ldid 重签）"
             echo "   SHA256: $(shasum -a 256 "$DEB" | awk '{print $1}')"
           }
 
@@ -270,6 +329,17 @@ jobs:
             || { echo '❌ 手动包里没有 install.sh'; exit 1; }
           unzip -l myfilza-jb-manual.zip | grep -q 'entitlements.plist' \
             || { echo '❌ 手动包里没有 entitlements.plist'; exit 1; }
+          # 安装脚本必须全自动（装上即用）：自动 respring + 可选 --check
+          grep -q 'sbreload' "$STAGE/install.sh" \
+            || { echo '❌ install.sh 没有自动 respring（sbreload）'; exit 1; }
+          grep -q -- '--check' "$STAGE/install.sh" \
+            || { echo '❌ install.sh 缺少 --check 体检模式'; exit 1; }
+          grep -q 'storage.AppDataContainers' "$STAGE/entitlements.plist" \
+            || { echo '❌ entitlements.plist 缺 storage.AppDataContainers'; exit 1; }
+          grep -q 'apt-get' "$STAGE/install.sh" \
+            || { echo '❌ install.sh 没有自动安装 ldid 的逻辑'; exit 1; }
+          sh -n "$STAGE/install.sh" || { echo '❌ install.sh 语法检查未通过'; exit 1; }
+          echo "   ✓ install.sh 自检通过（自动 respring / --check / 自动装 ldid / 语法 OK）"
           ls -lh myfilza-jb-manual.zip
           echo "SHA256: $(shasum -a 256 myfilza-jb-manual.zip | awk '{print $1}')"
 

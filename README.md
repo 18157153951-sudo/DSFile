@@ -494,4 +494,30 @@ App 在设备上的数据目录（都是 App 自己的 Documents，可以在「�
 并校验 `<root>/usr` 或 `<root>/bin` 存在），复制到 `<jbroot>/Applications/`、`ldid` 注入 entitlements、
 `uicache` 刷新、逐条校验；**幂等可重复运行**。详见 [docs/越狱模式.md](docs/越狱模式.md) 第十节。
 
+## 十五、0.9.3 / 0.9.4：越狱版「装上即用」
+
+真机反馈（iPad13,4 / iOS 16.4.1 / roothide）：用 Sileo 装完 **桌面没有图标**。
+
+**0.9.3 查出的主因**：`uicache` 在 `postinst` 里因为 PATH 里没有它而**静默失败**（旧写法是
+`uicache -a ... || true`）。于是两条安装路都改成**绝对路径 + 多路尝试 + 每一步打印命令与退出码**，
+并补上 roothide 机制要求的 `.jbroot` 符号链接、`chown 0:0` / `chmod 755`、签名校验（缺项即失败）。
+
+**0.9.4 做到「装上即用」**：安装过程**全自动**，用户不需要任何手动步骤 ——
+
+| 步骤 | 自动做什么 |
+| --- | --- |
+| 定位越狱根 | `jbroot` 命令 → 环境变量 → `.jbroot` 链接 → 扫描 `.jbroot-*` → `/var/jb`，逐个校验 `usr/`、`bin/` |
+| 依赖 | 缺 `ldid` 时**自动 `apt-get install -y ldid`** |
+| 安装 | 复制到 `<jbroot>/Applications/` → 建 `.jbroot` 链接 → `chown 0:0` / `chmod 755` |
+| 签名 | `ldid` 注入官方四件套，**逐条校验**，缺任何一项直接失败 |
+| 注册图标 | `uicache` 绝对路径多路尝试（`-a` / `--all` / `-p <app>`），全部打印 |
+| **刷新桌面** | **自动**：`sbreload` → `killall -9 SpringBoard` → `launchctl kickstart -k system/com.apple.SpringBoard` |
+| 结论 | 打印「装到哪 / 签名是否齐全 / 图标是否注册 / 桌面是否已刷新 / 现在去桌面点 myfilza JB」 |
+
+- deb 的 `postinst` 与手动包的 `install.sh` **行为一致**（两条路等价）；CI 会**断言** postinst 里确实包含
+  绝对路径 `uicache`、自动 respring、`.jbroot` 创建、`ldid` 重签，以及 `install.sh` 语法通过、含 `--check`、含自动装 `ldid`；
+- 用户侧只需**一条命令**（deb 装不上时）：`cd 该目录 && sh install.sh`；
+- `sh install.sh --check` 降级为**可选的排错手段**（只体检、不改动任何东西）；
+- 默认「访问路径 = 自动」会优先走越狱路径 → **装完打开就能用，不用改任何设置**。
+
 作者：端木awa

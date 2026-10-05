@@ -43,11 +43,27 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.9.2"
+    private static let appVersion = "0.9.4"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.9.4", date: "2026-10-05", items: [
+            "**越狱版改成「装上即用」**（真机：Sileo 装完桌面没有图标）：安装过程**全自动**，用户不需要任何手动步骤 —— deb 的 `postinst` 与手动包的 `install.sh` 行为完全一致",
+            "**自动刷新桌面（respring）**：安装+注册成功后依次尝试 `sbreload` → `killall -9 SpringBoard` → `launchctl kickstart -k system/com.apple.SpringBoard`，执行前打印「即将刷新桌面（图标会立刻出现）」；三种都失败才提示手动刷新 —— 这是「装完没图标」的最后一道自动补救",
+            "**缺 `ldid` 时自动安装**：脚本检测不到 `ldid` 会依次尝试 `apt-get install -y ldid`（含越狱根里的 apt-get），装不上才明确报错并给出指引",
+            "**jbroot 定位失败也有兜底**：`jbroot` 命令 → 环境变量 → **`.jbroot` 符号链接** → 扫描 `.jbroot-*` → `/var/jb`，每个候选都校验 `<root>/usr` 或 `<root>/bin` 存在才采用",
+            "**安装后打印一段给人看的结论**：装到哪、签名四件套是否齐全、`uicache` 是否注册成功、桌面是否已刷新、以及「现在去桌面点 myfilza JB」；默认「访问路径 = 自动」会优先走越狱路径，**不用改任何设置**",
+            "**`sh install.sh --check` 降级为可选的排错手段**（只体检、不改动任何东西）；用户侧只需一条命令：`cd 该目录 && sh install.sh`",
+            "**CI 自检加严**：断言 deb 的 `postinst` 里确实包含绝对路径 `uicache`、自动 respring（`sbreload`）、`.jbroot` 创建、`ldid` 重签；断言 `install.sh` 语法通过（`sh -n`）、含 `--check`、含自动装 `ldid` 的逻辑、`entitlements.plist` 含 `storage.AppDataContainers`"
+        ]),
+        ChangeEntry(version: "0.9.3", date: "2026-10-05", items: [
+            "**修「装完桌面没图标」的主因**：`uicache` 在 `postinst` 里因为 PATH 里没有它而**静默失败**（旧写法 `uicache -a ... || true`）—— 两条安装路都改成**绝对路径 + 多路尝试 + 每一步打印命令与退出码**（`<jbroot>/usr/bin/uicache`、`/usr/bin/uicache`、`/bin/uicache`；参数 `-a` / `--all` / `-p <app>`）",
+            "**补 roothide 机制要求的 `.jbroot` 符号链接**（含 mach-o 的目录要有 `.jbroot` 指向越狱根；dpkg 一般自动生成，手动安装由脚本创建）—— 缺了它 App 内的「越狱模式」也解析不到 jbroot",
+            "**补权限与所有权**：`chown -R 0:0`、目录与可执行文件 `755`，全部打印",
+            "**签名逐条校验**：`ldid -e` 里必须能看到官方四件套，缺任何一项直接失败（不再"装完才发现读不到"）",
+            "新增 `sh install.sh --check`：只体检、不改动，输出越狱根 / 是否已安装 / `.jbroot` 指向 / 签名关键项 / Info.plist / uicache 可用性"
+        ]),
         ChangeEntry(version: "0.9.2", date: "2026-10-05", items: [
             "**修越狱版 deb 装不上的问题**（真机：dpkg 报 `error creating directory \"./rootfs/Applications/myfilza.app\": Read-only file system`）：查了 roothide 官方文档与**真实包样例**后按规范重做 —— 架构字段改成 **`iphoneos-arm64e`**（roothide 仓库里 cocoatop / Renet / Comet 等真实包一律是这个值，我们之前写的 `iphoneos-arm64` 不对），并**额外产出一份 `iphoneos-arm64`** 兜底",
             "**entitlements 补成官方四件套**（roothide `entitlements.md`）：`platform-application` + `com.apple.private.security.no-sandbox` + **`com.apple.private.security.storage.AppBundles`** + **`com.apple.private.security.storage.AppDataContainers`**（后两个正是「读写 App 包体 / 数据容器」要用的，之前漏了），另加 `container-required=false` 与 `get-task-allow`",
@@ -404,15 +420,18 @@ struct SettingsView: View {
             tail = "→ 越狱路径可用（不需要内核漏洞）。"
         } else if DSSignatureIsTrollStoreInstalled() {
             tail = "→ 检测到 TrollStore 安装但读不到系统路径：roothide 下 TrollStore 安装的 App "
-                 + "**不会**获得越狱权限。二选一：① 用 Sileo / Zebra 安装 "
-                 + "`myfilza_0.9.2_iphoneos-arm64e.deb`（桌面名 myfilza JB，bundle id = com.dsfile.app.jb）；"
-                 + "② deb 装不上时改用**手动安装包** `myfilza-jb-manual.zip`（解压后执行 `sh install.sh`）。"
+                 + "**不会**获得越狱权限。二选一：① 用 Sileo / Zebra 安装越狱版 deb"
+                 + "（`myfilza_<版本>_iphoneos-arm64e.deb`，桌面名 myfilza JB，bundle id = com.dsfile.app.jb）"
+                 + "—— 装完会**自动刷新桌面**，打开即用；"
+                 + "② deb 装不上时改用**手动安装包** `myfilza-jb-manual.zip`：解压后只需一条命令 `sh install.sh`"
+                 + "（全自动：找越狱根 → 签名 → 注册图标 → 刷新桌面）。"
                  + "两者都会装进 `<jbroot>/Applications/` 并注入越狱 entitlements。"
                  + "或把访问路径改成「自动」/「仅内核」。"
         } else if looksJB {
-            tail = "→ 有越狱特征但本 App 没有沙盒例外：用 Sileo / Zebra 安装 "
-                 + "`myfilza_0.9.2_iphoneos-arm64e.deb`，或用手动安装包 `myfilza-jb-manual.zip`"
-                 + "（解压后执行 `sh install.sh`），或改用「自动」/「仅内核」。"
+            tail = "→ 有越狱特征但本 App 没有沙盒例外：用 Sileo / Zebra 安装越狱版 deb"
+                 + "（`myfilza_<版本>_iphoneos-arm64e.deb`，装完自动刷新桌面），"
+                 + "或用手动安装包 `myfilza-jb-manual.zip`（解压后只需一条命令 `sh install.sh`，全自动），"
+                 + "或改用「自动」/「仅内核」。"
         } else {
             tail = "→ 没有检测到越狱特征；本机请用「自动」或「仅内核」。"
         }

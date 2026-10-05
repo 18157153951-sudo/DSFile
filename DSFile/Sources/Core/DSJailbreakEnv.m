@@ -363,18 +363,19 @@ int DSJailbreakActivate(NSString *_Nullable *_Nullable detail)
             @"检测到 TrollStore 安装，但本 App 仍读不到系统路径 —— roothide 下 TrollStore 安装的 App "
             @"**不会**获得越狱权限（roothide 的设计就是让 App 看不到越狱）。"
             @"要做的事（二选一）："
-            @"① 用 Sileo / Zebra 安装 myfilza_0.9.2_iphoneos-arm64e.deb（桌面名 myfilza JB）；"
+            @"① 用 Sileo / Zebra 安装越狱版 deb（myfilza_<版本>_iphoneos-arm64e.deb，桌面名 myfilza JB）"
+            @"   —— 装完会**自动刷新桌面**，打开即用；"
             @"② deb 装不上时（例如 dpkg 报 “./rootfs/... Read-only file system”），"
-            @"   改用**手动安装包** myfilza-jb-manual.zip：解压后把 myfilza.app / entitlements.plist / "
-            @"install.sh 放同一目录，在越狱终端执行 sh install.sh（详见包内 README.txt）。"
+            @"   改用**手动安装包** myfilza-jb-manual.zip：解压后只需一条命令 sh install.sh"
+            @"   （全自动：找越狱根 → ldid 签名 → uicache 注册 → 自动刷新桌面；详见包内 README.txt）。"
             @"越狱版 bundle id 是 com.dsfile.app.jb，与侧载版的 com.dsfile.app 是两个 App，可共存；"
             @"装到 <jbroot>/Applications/ 并带上越狱 entitlements 后，越狱模式即可读写全盘。"
             @"（不想折腾的话，把「访问路径」改成「仅内核」/「自动」走内核那条。）"];
     } else if (looksJB) {
         [reasons addObject:
             @"检测到越狱特征，但本 App 仍受沙盒限制 —— 本 App 没有被授予沙盒例外。"
-            @"要做的事：用 Sileo / Zebra 安装 myfilza_0.9.2_iphoneos-arm64e.deb，"
-            @"或用手动安装包 myfilza-jb-manual.zip（解压后在越狱终端执行 sh install.sh）；"
+            @"要做的事：用 Sileo / Zebra 安装越狱版 deb（myfilza_<版本>_iphoneos-arm64e.deb，装完自动刷新桌面），"
+            @"或用手动安装包 myfilza-jb-manual.zip（解压后只需一条命令 sh install.sh，全自动）；"
             @"两者都会把 App 装进 <jbroot>/Applications/ 并注入越狱 entitlements"
             @"（platform-application / no-sandbox / storage.AppBundles / storage.AppDataContainers）；"
             @"或把「访问路径」改成「仅内核」/「自动」走内核那条。"];
