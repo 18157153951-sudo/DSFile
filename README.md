@@ -471,4 +471,27 @@ App 在设备上的数据目录（都是 App 自己的 Documents，可以在「�
 - 设置页「关于 → 版本形态」同样显示，不用翻日志；
 - 「仅越狱」失败时的指引也改了：**先卸载 TrollStore 装的侧载版 myfilza**，再装 `myfilza_0.9.1_iphoneos-arm64.deb`。
 
+## 十四、0.9.2：按 roothide 官方规范重做 deb + 手动安装包
+
+真机反馈（iPad13,4 / iOS 16.4.1 / roothide）：0.9.1 的 deb 装不上，dpkg 报
+`error creating directory "./rootfs/Applications/myfilza.app": Read-only file system`。
+
+查了 **roothide 官方文档 + 真实包样例** 后确认三处偏差并修正：
+
+| 项 | 之前 | 0.9.2 |
+| --- | --- | --- |
+| `Architecture` | `iphoneos-arm64` | **`iphoneos-arm64e`**（roothide 仓库里 cocoatop / Renet / Comet 等真实包一律是这个值），另出 `iphoneos-arm64` 兜底 |
+| entitlements | 缺两个 | **roothide 官方四件套**：`platform-application` + `no-sandbox` + **`storage.AppBundles`** + **`storage.AppDataContainers`**（后两个正是读写 App 包体/容器要用的） |
+| postinst | 只 `uicache` | 在设备上**再用 `ldid` 重新签名一次**（entitlements 内联在脚本里），再 `uicache` |
+
+> `rootfs/` 那个报错的由来（`roothide.md` 原文）：bootstrap 以 jbroot 为根，并在 jbroot 里放一个
+> 名为 **`rootfs`** 的符号链接指向 **iOS 原始根文件系统（只读）**；路径一旦落到 `rootfs/` 就必然只读失败。
+> 所以 0.9.2 的 CI 里**断言 data 路径中不出现 `rootfs/`**。
+
+**新增手动安装包 `myfilza-jb-manual.zip`**（deb 装不上时的可靠退路，完全不经过 dpkg）：
+内含 `myfilza.app` + `entitlements.plist` + `install.sh` + `README.txt`，在越狱终端执行 `sh install.sh` 即可 ——
+脚本按官方规则定位 jbroot（`jbroot` 命令 → 环境变量 → **`.jbroot` 符号链接** → 扫描 `.jbroot-*` → `/var/jb`，
+并校验 `<root>/usr` 或 `<root>/bin` 存在），复制到 `<jbroot>/Applications/`、`ldid` 注入 entitlements、
+`uicache` 刷新、逐条校验；**幂等可重复运行**。详见 [docs/越狱模式.md](docs/越狱模式.md) 第十节。
+
 作者：端木awa

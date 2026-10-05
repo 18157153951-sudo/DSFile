@@ -112,7 +112,8 @@ struct EnvironmentInfo {
         if flavor == .roothide {
             return "检测到 roothide，但本 App 仍受沙盒限制 —— TrollStore 安装的 App 在 roothide 下"
                 + "**不会**获得越狱权限（roothide 的设计就是让 App 看不到越狱）；"
-                + "请改用越狱版（.deb）安装（Sileo / Zebra，装进 <jbroot>/Applications/），"
+                + "请用 Sileo / Zebra 安装越狱版 deb（装进 <jbroot>/Applications/，带越狱 entitlements），"
+                + "或用**手动安装包** myfilza-jb-manual.zip（解压后执行 sh install.sh），"
                 + "或把「访问路径」改成「自动」/「仅内核」走内核那条。"
         }
         if flavor.isJailbroken {

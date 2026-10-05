@@ -43,11 +43,18 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.9.1"
+    private static let appVersion = "0.9.2"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.9.2", date: "2026-10-05", items: [
+            "**修越狱版 deb 装不上的问题**（真机：dpkg 报 `error creating directory \"./rootfs/Applications/myfilza.app\": Read-only file system`）：查了 roothide 官方文档与**真实包样例**后按规范重做 —— 架构字段改成 **`iphoneos-arm64e`**（roothide 仓库里 cocoatop / Renet / Comet 等真实包一律是这个值，我们之前写的 `iphoneos-arm64` 不对），并**额外产出一份 `iphoneos-arm64`** 兜底",
+            "**entitlements 补成官方四件套**（roothide `entitlements.md`）：`platform-application` + `com.apple.private.security.no-sandbox` + **`com.apple.private.security.storage.AppBundles`** + **`com.apple.private.security.storage.AppDataContainers`**（后两个正是「读写 App 包体 / 数据容器」要用的，之前漏了），另加 `container-required=false` 与 `get-task-allow`",
+            "**新增手动安装包 `myfilza-jb-manual.zip`**（deb 装不上时的可靠退路）：内含 `myfilza.app` + `entitlements.plist` + `install.sh` + `README.txt`；在越狱终端执行 `sh install.sh` 即可 —— 脚本按官方规则定位越狱根（`jbroot` 命令 → 环境变量 → **`.jbroot` 符号链接** → 扫描 `.jbroot-*` → `/var/jb`），校验 `<root>/usr` 或 `<root>/bin` 存在才采用，然后复制到 `<jbroot>/Applications/`、用 `ldid` 注入 entitlements、`uicache` 刷新、最后逐条校验并打印结果（幂等，可重复运行）",
+            "**deb 的 postinst 会在设备上再用 `ldid` 重新签名一次**（entitlements 直接内联在脚本里）：这样即使安装过程把签名弄丢，装完仍然是带沙盒例外的越狱 App（真实 roothide 包也这么做）",
+            "**CI 自检加严**：两份 deb 都断言「`Architecture` 字段与文件名一致」「文件清单含 `Applications/myfilza.app/myfilza`」「**路径里不允许出现 `rootfs/`**（出现就说明会被当成写真实 rootfs，正是这次真机报错的原因）」，以及签名里四件套 entitlements 齐全"
+        ]),
         ChangeEntry(version: "0.9.1", date: "2026-10-05", items: [
             "**越狱版改用独立 bundle id `com.dsfile.app.jb`**（显示名仍是 `myfilza JB`）：0.9.0 的越狱版和侧载版**共用** `com.dsfile.app`，装上去会互相顶、日志也分不清谁在跑（真机踩到）—— 现在两个 App 互不影响，CI 里加了自检（改完不是 `.jb` 就构建失败）",
             "**启动日志第一行写清「本次跑的是哪个版本形态」**：`版本形态 = 越狱版(.deb) / MHA 变体 / 侧载版（bundle id = …）` —— 判定只看 bundle id（`.jb` 结尾 = 越狱版；`com.apple.mobile.MobileHouseArrest` = MHA 变体；其它 = 侧载版），同时把 bundle id 原文打出来，再也不用靠猜",
@@ -397,13 +404,15 @@ struct SettingsView: View {
             tail = "→ 越狱路径可用（不需要内核漏洞）。"
         } else if DSSignatureIsTrollStoreInstalled() {
             tail = "→ 检测到 TrollStore 安装但读不到系统路径：roothide 下 TrollStore 安装的 App "
-                 + "**不会**获得越狱权限。**请先卸载 TrollStore 装的侧载版 myfilza**，"
-                 + "再用 Sileo / Zebra 安装 `myfilza_0.9.1_iphoneos-arm64.deb`（桌面名 myfilza JB，"
-                 + "bundle id = com.dsfile.app.jb，和侧载版是两个 App），"
+                 + "**不会**获得越狱权限。二选一：① 用 Sileo / Zebra 安装 "
+                 + "`myfilza_0.9.2_iphoneos-arm64e.deb`（桌面名 myfilza JB，bundle id = com.dsfile.app.jb）；"
+                 + "② deb 装不上时改用**手动安装包** `myfilza-jb-manual.zip`（解压后执行 `sh install.sh`）。"
+                 + "两者都会装进 `<jbroot>/Applications/` 并注入越狱 entitlements。"
                  + "或把访问路径改成「自动」/「仅内核」。"
         } else if looksJB {
-            tail = "→ 有越狱特征但本 App 没有沙盒例外：**先卸载侧载版 myfilza**，"
-                 + "再用 Sileo / Zebra 安装 `myfilza_0.9.1_iphoneos-arm64.deb`，或改用「自动」/「仅内核」。"
+            tail = "→ 有越狱特征但本 App 没有沙盒例外：用 Sileo / Zebra 安装 "
+                 + "`myfilza_0.9.2_iphoneos-arm64e.deb`，或用手动安装包 `myfilza-jb-manual.zip`"
+                 + "（解压后执行 `sh install.sh`），或改用「自动」/「仅内核」。"
         } else {
             tail = "→ 没有检测到越狱特征；本机请用「自动」或「仅内核」。"
         }

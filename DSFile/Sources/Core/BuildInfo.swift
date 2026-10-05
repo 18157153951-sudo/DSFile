@@ -15,7 +15,7 @@ import Foundation
 enum BuildInfo {
     /// 由 GitHub Actions 用 sed 替换，本地构建时保持 "dev"
     static let stamp = "dev"
-    static let version = "0.9.1"
+    static let version = "0.9.2"
 
     /// 越狱版（.deb）的 bundle id 后缀（完整值是 com.dsfile.app.jb）
     static let jailbreakBundleIDSuffix = ".jb"
