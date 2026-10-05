@@ -25,6 +25,7 @@ name: Build Jailbreak Deb
 #     apt.tinyapps.Renet-*.deb）：data 布局为 ./Applications/<Name>.app/...，
 #     Architecture 一律 iphoneos-arm64e，postinst 里会 chown/ldid -s/uicache。
 #
+# 0.9.3：postinst 里 uicache 改绝对路径+多路尝试且全部打印；补 .jbroot 符号链接（装完没图标的主因）
 # 0.9.2：
 #   · 架构字段改为 iphoneos-arm64e（并额外产出一个 iphoneos-arm64 变体兜底）
 #   · entitlements 用官方四件套（+ container-required=false / get-task-allow）
@@ -46,7 +47,7 @@ permissions:
   contents: read
 
 env:
-  VERSION: 0.9.2
+  VERSION: 0.9.3
 
 jobs:
   deb:
@@ -162,8 +163,30 @@ jobs:
             ldid -S/tmp/myfilza-jb-ent.plist "$APP/myfilza" 2>/dev/null || true
             rm -f /tmp/myfilza-jb-ent.plist
           fi
-          if command -v uicache >/dev/null 2>&1; then
-            uicache -a >/dev/null 2>&1 || uicache -p /Applications/myfilza.app >/dev/null 2>&1 || true
+          # 刷新图标：绝对路径 + 多路尝试，且**全部打印**（uicache 静默失败是"装完没图标"的主因）
+          UICOK=0
+          for U in /usr/bin/uicache /bin/uicache "$(command -v uicache 2>/dev/null || true)"; do
+            [ -n "$U" ] && [ -x "$U" ] || continue
+            for A in -a --all; do
+              echo "uicache: $U $A"
+              if "$U" "$A"; then UICOK=1; break; fi
+            done
+            [ "$UICOK" = "1" ] && break
+            echo "uicache: $U -p $APP"
+            if "$U" -p "$APP"; then UICOK=1; break; fi
+          done
+          if [ "$UICOK" = "1" ]; then
+            echo "uicache 成功"
+          else
+            echo "⚠️ uicache 全部失败：桌面可能不出现图标 —— 请执行 sbreload 或 killall -9 SpringBoard"
+          fi
+          # roothide 机制：含 mach-o 的目录应有 .jbroot 符号链接指向越狱根（dpkg 一般会自动生成，缺了就补）
+          if [ -e "$APP/.jbroot" ]; then
+            echo ".jbroot 已存在: $(readlink "$APP/.jbroot" 2>/dev/null)"
+          elif [ -n "${JBROOT:-}" ]; then
+            ln -s "$JBROOT" "$APP/.jbroot" && echo ".jbroot -> $JBROOT"
+          else
+            echo "提示：未设置 JBROOT，跳过 .jbroot 创建（dpkg 一般会自动生成）"
           fi
           exit 0
           POSTINST
