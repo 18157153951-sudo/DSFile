@@ -89,6 +89,51 @@ static NSString *ds_entitlement_string(NSString *name)
     return result;
 }
 
+#pragma mark - TeamIdentifier / application-identifier / TrollStore
+
+NSString *DSSignatureTeamIdentifier(void)
+{
+    static NSString *cached = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cached = ds_entitlement_string(@"com.apple.developer.team-identifier");
+    });
+    return cached;
+}
+
+NSString *DSSignatureApplicationIdentifier(void)
+{
+    static NSString *cached = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cached = ds_entitlement_string(@"application-identifier");
+    });
+    return cached;
+}
+
+NSString *DSSignatureTrollStoreEvidence(void)
+{
+    static NSString *evidence = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *team = DSSignatureTeamIdentifier();
+        NSString *appID = DSSignatureApplicationIdentifier();
+        if (team.length > 0 && [team isEqualToString:@"TROLLTROLL"]) {
+            evidence = [NSString stringWithFormat:@"TeamIdentifier = %@", team];
+        } else if (appID.length > 0 && [appID hasPrefix:@"TROLLTROLL."]) {
+            evidence = [NSString stringWithFormat:@"application-identifier = %@", appID];
+        } else {
+            evidence = nil;
+        }
+    });
+    return evidence;
+}
+
+BOOL DSSignatureIsTrollStoreInstalled(void)
+{
+    return DSSignatureTrollStoreEvidence() != nil;
+}
+
 #pragma mark - 取标识
 
 /// 去掉 TeamID 前缀：`ABCDE12345.com.foo.bar` → `com.foo.bar`
@@ -179,6 +224,11 @@ NSString *DSSignatureDiagnosticReport(void)
     [out appendFormat:@"[MHA 诊断] TeamIdentifier = %@；application-identifier = %@\n",
         teamIdentifier.length ? teamIdentifier : @"(读取不到)",
         applicationIdentifier.length ? applicationIdentifier : @"(读取不到)"];
+    if (DSSignatureIsTrollStoreInstalled()) {
+        [out appendFormat:@"[MHA 诊断] 安装方式：TrollStore（依据 %@）—— 该环境下 App 应带 platform-application，"
+                           @"若仍读不到系统路径，请用 TrollStore 重新安装本 IPA\n",
+            DSSignatureTrollStoreEvidence()];
+    }
     [out appendFormat:@"[MHA 诊断] csops 原始值：signingID = %@；identity = %@\n",
         rawSigningID.length ? rawSigningID : @"(取不到)",
         rawIdentity.length ? rawIdentity : @"(取不到)"];

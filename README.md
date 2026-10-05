@@ -7,7 +7,7 @@
 - 显示名 / 产品名：`myfilza`（`CFBundleDisplayName` / `PRODUCT_NAME`）
 - 工程名 / 可执行文件：`myfilza`
 - Bundle ID：`com.dsfile.app`（**保持不变**：改名后的包是覆盖升级，设备上的脚本、备份、日志都还在）
-- 版本：0.8.0
+- 版本：0.8.1
 - 部署目标：iOS 15.0，架构 `arm64`
 
 ---
@@ -20,6 +20,7 @@
 | --- | --- |
 | 浏览整机文件系统 | 激活后文件页从 `/` 开始浏览（未激活时只能待在自己的沙盒 Documents 里）；支持显示隐藏文件、按名称/大小/时间排序、按关键字过滤、路径跳转、书签式面包屑 |
 | 未激活也能列出 App（0.8.0） | 列表走私有接口 `LSApplicationWorkspace`（不需要文件系统权限），所以「应用管理器 / 替换页选目标」打开就有内容；只有**读容器里的文件**需要先激活 |
+| 越狱 / TrollStore 环境（0.8.1） | 自动识别 **TrollStore**（看签名 `TeamIdentifier == TROLLTROLL`，不需要任何权限）与 **roothide / rootless / 经典越狱**（路径 + 环境变量 + 越狱库 + LaunchServices 列表四类信号）；识别到就**直接走 POSIX**，不必先跑内核漏洞。读不到系统路径时不再含糊地说「未越狱」，而是显示「未检测到越狱特征」并列出**试过哪些信号、各自结果** |
 | 文件基本操作 | 新建文件夹、新建文件、重命名、复制一份（自动 `-1`、`-2` 避重名）、移动到目录、删除、分享、复制路径 |
 | 文本编辑 | 打开文本文件编辑并保存（UTF-8 → Latin1 → 二进制可打印化三级兜底，超过 4 MB 拒绝按文本打开）；保存时自动在旁留一份 `原文件名.dsfbak`，可从菜单还原 |
 | 十六进制查看 | 只读十六进制查看器，每页 8192 字节，可翻页、可跳转到偏移（支持 `0x1F40` / `1F40` / `8000` 三种写法） |
@@ -341,5 +342,62 @@ App 在设备上的数据目录（都是 App 自己的 Documents，可以在「�
 只有 26+ 才齐全 —— 这样即使手上只有 18.5 设备，26/27 上的失败也能靠日志定位。
 
 设置页「内核模式」的页脚现在会直接写明这两条顺序与依据；`docs/3105模式.md` 第十三节有完整细节。
+
+---
+
+## 十二、0.8.1：越狱 / TrollStore 环境探测 + 逐路径 errno
+
+真机（**iPad13,4 / iOS 16.4.1 / roothide + TrollStore**）上报「越狱设备没能正常获取权限」后，
+这一版把「环境判定」和「文件访问诊断」都做扎实了。
+
+### 1）TrollStore 用**签名信息**判定（不需要任何权限）
+
+真机日志里 TrollStore 安装的包签名是：
+
+```
+[MHA 诊断] TeamIdentifier = TROLLTROLL；application-identifier = TROLLTROLL.*
+```
+
+所以现在直接看签名：**`TeamIdentifier == TROLLTROLL`** 或 **`application-identifier` 以 `TROLLTROLL.` 开头**
+→ 标记为 TrollStore 环境（`DSSignatureIsTrollStoreInstalled()`）。
+文件系统痕迹（`com.opa334.trollstore.plist`、`.TrollStore`、`TrollStore.app`）只作补充 —— 因为**没权限时那些路径本来就看不到**。
+
+### 2）roothide / 越狱：四类信号逐条试，结果全部记下来
+
+| 信号 | 具体做法 |
+| --- | --- |
+| 路径 | `/var/mobile/Library/roothide`、任意 `.jbroot-*`（roothide 的越狱根前缀） |
+| 环境变量 | `JBROOT` / `ROOTHIDE` / `THEOS_PACKAGE_INSTALL_PREFIX` / `DYLD_INSERT_LIBRARIES`（含 roothide / jbroot / substrate / substitute 就采信） |
+| 越狱库 | `libroothide.dylib` / `libsubstitute.dylib` / `libsubstrate.dylib` 是否存在；对 `libroothide` **只 `dlopen` 确认可加载、不调用任何函数** |
+| LaunchServices | 已安装 App 里有没有 roothide / TrollStore / bootstrap / Sileo / Zebra / Dopamine / palera1n 相关包名（这条路不需要权限） |
+
+**读不到 ≠ 未越狱**：现在显示「**未检测到越狱特征**」，并在设置页「环境」里给出可展开的
+「探测细节（越狱信号 / 逐路径 errno）」，一行一条列出试过什么、结果如何。
+
+### 3）文件访问：逐路径 + 真实 errno（新增 `DSFSAccessProbe`）
+
+每个路径都记 `opendir` 的结果与 `errno`：
+
+```
+[文件访问探针] 列目录 /var/mobile → 失败 errno=1 EPERM(沙盒拒绝)
+[文件访问探针] 列目录 /var/containers/Bundle/Application → 成功（12 项）
+[文件访问探针] 写探针 /var/tmp/.myfilza_fs_probe → 成功
+```
+
+- 探测路径：`/var/mobile`、`/var/mobile/Containers/Data/Application`、`/var/containers/Bundle/Application`、`/var/jb`、`/private/var/mobile`；
+- 写探针：`/var/mobile` 与 `/var/tmp` 各写一次（写完立刻删掉自己建的文件）；
+- errno 读法：**EPERM=沙盒拒绝**（本进程没有该路径的沙盒例外）、**EACCES=权限不足**、**ENOENT=路径不存在**、**EROFS=只读文件系统**；
+- **TrollStore 下「只读可达」也算已有文件系统访问**（不再强制先跑内核漏洞）；
+- 点设置页「自检」会把整份报告写进日志，一次上报即可定位。
+
+### 4）修 iOS 16 上 `LSApplicationWorkspace` 返回 0 个 App
+
+以前 `allInstalledApplications` 返回**空数组**就被当成「接口可用但没有 App」，于是不再尝试别的接口 ✗。
+现在依次尝试 `allInstalledApplications` → `allApplications` → `installedApplications` → `allApplicationsWithAdditionalInfo`，
+**空数组也继续试下一个**；框架路径也扩到 5 个候选（`CoreServices` / `MobileCoreServices`（框架与私有） / `LaunchServices`（两处）），
+逐个 `dlopen` 并记录成功/失败。标识字段取不到时退 `bundleIdentifier`，名字取不到时退 `itemName`。
+
+列表为空时，日志会直接写清卡在哪一步（类找不到 / 哪个 `dlopen` 失败 / 哪个 selector 不响应 / 返回空数组
+—— 最后一种多半是本进程缺少 `com.apple.private.mobileinstall.allowedSPI`）。
 
 作者：端木awa

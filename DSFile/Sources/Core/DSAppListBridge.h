@@ -32,6 +32,12 @@ FOUNDATION_EXPORT NSString * const DSAppListKeyDataPath;        // 数据容器�
 /// 不可用 / 上次失败的原因（一句话，给日志和界面用）
 + (nullable NSString *)lastFailureReason;
 
+/// 上一次调用的逐步诊断（每行一步：dlopen 路径、selector 是否响应、拿到几条…）
++ (NSArray<NSString *> *)lastDiagnostics;
+
+/// 逐步诊断的多行文本（直接写日志 / 导出诊断用）
++ (NSString *)lastDiagnosticsText;
+
 /// 通过 LaunchServices 私有接口取已安装 App 列表。
 /// 返回 nil = 这条路不可用（原因见 +lastFailureReason）；返回空数组 = 可用但没有 App。
 + (nullable NSArray<NSDictionary<NSString *, NSString *> *> *)installedAppsFromLaunchServices;

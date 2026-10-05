@@ -43,11 +43,20 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.8.0"
+    private static let appVersion = "0.8.1"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.8.1", date: "2026-10-04", items: [
+            "**越狱环境探测重做**（真机：iPad13,4 / iOS 16.4.1 / roothide + TrollStore 上报「没能正常获取权限」）：TrollStore 现在用**签名信息**判定 —— `TeamIdentifier == TROLLTROLL` 或 `application-identifier` 以 `TROLLTROLL.` 开头（这条路**不需要任何权限**，真机日志已证明可读）",
+            "**roothide 多信号识别**：路径（`/var/mobile/Library/roothide`、`.jbroot-*`）+ 环境变量（`JBROOT` / `ROOTHIDE` / `DYLD_INSERT_LIBRARIES`）+ 越狱库（`libroothide` / `libsubstitute` / `libsubstrate`，只 `dlopen` 不调用）+ LaunchServices 列表里的越狱相关 App（roothide / TrollStore / bootstrap / Sileo…）",
+            "**不再把「读不到系统路径」说成「未越狱」**：现在显示「未检测到越狱特征」，并在设置页与日志里列出**试过哪些信号、各自结果**；如果检测到越狱/TrollStore 却仍读不到系统路径，会直接给出解释（TrollStore 安装缺 `platform-application` / roothide 下 App 仍受沙盒限制）",
+            "**文件访问改成逐路径 + 真实 errno**（新增 `DSFSAccessProbe`）：`/var/mobile`、`/var/mobile/Containers/Data/Application`、`/var/containers/Bundle/Application`、`/var/jb`、`/private/var/mobile` 逐个列目录，再在 `/var/mobile` 与 `/var/tmp` 各写一次探针，失败时记 `EPERM(沙盒拒绝)` / `EACCES(权限不足)` / `ENOENT(不存在)` 等 —— 一次上报即可定位",
+            "**TrollStore 下「只读可达」也算已有文件系统访问**：如果签名是 TrollStore 且沙盒外可读，就不再要求先跑内核漏洞（界面会标注「只读可达」）",
+            "**修 LSApplicationWorkspace 在 iOS 16 上返回 0 个 App**：以前 `allInstalledApplications` 返回**空数组**就当成「可用但没有 App」，不再继续尝试其它接口 —— 现在会依次试 `allInstalledApplications` / `allApplications` / `installedApplications` / `allApplicationsWithAdditionalInfo`，**空数组也继续试**，并逐个 dlopen 候选框架路径（CoreServices / MobileCoreServices / LaunchServices），每一步都写诊断",
+            "**标识字段兜底**：`applicationIdentifier` 取不到时退 `bundleIdentifier`，名字取不到时退 `itemName`；列表为空时日志会写清是「类找不到 / 哪个 dlopen 失败 / 哪个 selector 不响应 / 返回空数组（多半缺 `com.apple.private.mobileinstall.allowedSPI`）」"
+        ]),
         ChangeEntry(version: "0.8.0", date: "2026-10-04", items: [
             "**没权限也能列出 App**：App 列表多了一个**不需要任何权限**的来源 —— 私有接口 `LSApplicationWorkspace`（运行时查找，不链接私有框架）。以前没逃逸 / 没激活时永远显示「扫描到 0 个 App」，现在**打开就能看到 App 列表**（名字、图标、容器路径），只有「读容器里的文件」需要先激活",
             "**应用管理器不再因为没权限就空白**：未激活时会显示列表 + 一条说明「列表来自系统接口（不需要权限）；读取容器内容需要先激活」，点进目录读不到时会明确提示「需要先激活访问才能读取容器内容」，不再留白",
@@ -225,6 +234,9 @@ struct SettingsView: View {
 
     private var environmentSection: some View {
         let info = EnvironmentProbe.info()
+        let notes = info.detectionNotes
+        let report = info.accessReport
+        let hint = info.sandboxHint
         return Section {
             ForEach(info.badges, id: \.title) { badge in
                 HStack(spacing: 12) {
@@ -243,6 +255,29 @@ struct SettingsView: View {
                     Spacer()
                 }
                 .padding(.vertical, 2)
+            }
+
+            if let hint = hint {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+
+            DisclosureGroup("探测细节（越狱信号 / 逐路径 errno）") {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(notes, id: \.self) { note in
+                        Text(note)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !report.isEmpty {
+                        Text(report)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
 
             Button {
@@ -986,12 +1021,24 @@ struct SettingsView: View {
     }
 
     private func probeFilesystem() {
+        // 逐路径 + 真实 errno 全部写进日志：越狱/TrollStore 环境下"没能获取权限"时，这份报告就是定位依据
+        let env = EnvironmentProbe.info(force: true)
+        DSLog.shared.info(DSFilesystemAccessSummaryLine(), source: "设置")
+        for line in DSFilesystemAccessReport().split(separator: "\n") {
+            DSLog.shared.info(String(line), source: "设置")
+        }
+
         if DSKernel.probeFilesystemAccess() {
-            DSLog.shared.info("现场自检通过：沙盒外读写可用", source: "设置")
-            presentAlert("自检通过", "刚刚在沙盒外成功写入并删除了一笔探针文件，当前可以读写整机文件。")
+            DSLog.shared.info("现场自检通过：沙盒外访问可用（\(env.summary)）", source: "设置")
+            let detail = env.canWriteOutsideSandbox
+                ? "刚刚在沙盒外成功写入并删除了一笔探针文件，当前可以读写整机文件。"
+                : "沙盒外**可读**（只读可达）：可以列出并读取容器内容；写入仍需要激活内核访问或换成有权限的安装方式。"
+            presentAlert("自检通过", detail)
         } else {
-            DSLog.shared.warn("现场自检没通过：沙盒外读写不可用", source: "设置")
-            presentAlert("自检没通过", "这次探针写盘失败了。如果状态显示「已激活」，可以先点「重试沙盒改写」，或者试一次「提权到 root」。")
+            DSLog.shared.warn("现场自检没通过：沙盒外访问不可用（\(env.summary)）", source: "设置")
+            let fallback = "这次探针失败了。日志里有逐路径 errno（EPERM=沙盒拒绝 / EACCES=权限不足 / ENOENT=不存在），"
+                + "可以据此判断是环境问题还是权限问题。"
+            presentAlert("自检没通过", env.sandboxHint ?? fallback)
         }
     }
 

@@ -10,3 +10,4 @@
 #import "DSShell.h"
 #import "DSSignatureInfo.h"
 #import "DSAppListBridge.h"
+#import "DSFSAccessProbe.h"

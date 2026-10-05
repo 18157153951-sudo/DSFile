@@ -182,6 +182,14 @@ enum AppScanner {
         }
         line += "）"
         DSLog.shared.info(line, source: "AppScanner")
+
+        // 系统接口一个都没拿到时，把逐步诊断也写进日志：
+        // 一次上报就能看出卡在哪一步（类找不到 / 哪个 dlopen 失败 / 哪个 selector 不响应 / 返回空数组）
+        if report.launchServicesCount == 0 {
+            for diagLine in DSAppListBridge.lastDiagnostics() {
+                DSLog.shared.warn("LS 诊断：\(diagLine)", source: "AppScanner")
+            }
+        }
         return apps
     }
 

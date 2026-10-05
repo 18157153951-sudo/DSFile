@@ -28,6 +28,21 @@ FOUNDATION_EXPORT NSString * _Nullable DSSignatureIdentifier(void);
 /// 三态判断：1 = 与 MHA 一致；0 = 明确不一致；-1 = 无法判断
 FOUNDATION_EXPORT NSInteger DSSignatureIdentifierMatchesMHA(void);
 
+/// 签名里的 TeamIdentifier（取不到返回 nil）
+FOUNDATION_EXPORT NSString * _Nullable DSSignatureTeamIdentifier(void);
+
+/// 签名里的 application-identifier（形如 TEAMID.bundle.id；取不到返回 nil）
+FOUNDATION_EXPORT NSString * _Nullable DSSignatureApplicationIdentifier(void);
+
+/// 是不是 TrollStore 安装的：
+///   · TeamIdentifier == "TROLLTROLL"，或
+///   · application-identifier 以 "TROLLTROLL." 开头
+/// 这是**不需要任何权限**就能拿到的可靠信号（真机日志里 TrollStore 安装的包就是 TROLLTROLL）。
+FOUNDATION_EXPORT BOOL DSSignatureIsTrollStoreInstalled(void);
+
+/// TrollStore 判定的依据（一句话，给日志/界面用；不是 TrollStore 时返回 nil）
+FOUNDATION_EXPORT NSString * _Nullable DSSignatureTrollStoreEvidence(void);
+
 /// 多行诊断报告（用于写日志）：签名标识 / TeamIdentifier / application-identifier / 结论
 FOUNDATION_EXPORT NSString *DSSignatureDiagnosticReport(void);
 

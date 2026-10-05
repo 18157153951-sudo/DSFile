@@ -41,6 +41,8 @@
 #import "DSCredEscape.h"               // cred 路线的逃逸 / 提权（不调用 proc_self / 上游 sandbox_escape）
 #import "DS3105Kernel.h"              // 3105 模式：完全独立的第二个内核后端，只在被选中时使用
 #import "DSMHAKernel.h"               // MHA 身份（零内核）：MCM 容器租约，只在 bundle id 就是 MHA 时尝试
+#import "DSSignatureInfo.h"           // 签名标识 / TeamIdentifier / TrollStore 判定
+#import "DSFSAccessProbe.h"           // 逐路径 + 真实 errno 的文件访问探针
 #import "patchfinder.h"                // init_xpf（保留上游 XPF 能力，见下）
 #import "machine_info.h"               // CPU 家族宏
 
@@ -330,7 +332,18 @@ static uint32_t ds_cpu_family(void)
 + (BOOL)isEscaped { return gEscaped; }
 + (BOOL)isExploitDone { return gExploitDone; }
 + (BOOL)isRunningAsRoot { return getuid() == 0; }
-+ (BOOL)probeFilesystemAccess { return ds_probe_write_access() || DSMHAAccessProbePasses(); }
+/// 能不能读写沙盒外：
+///   · 现场写探针成功（内核逃逸 / 越狱环境下可直接写）；
+///   · 或 MHA 容器租约已生效（零内核）；
+///   · 或 **TrollStore 环境下沙盒外可读**（真机：TrollStore 装的 App 带 platform-application，
+///     可能只给读权限；这种"只读可达"也算已有文件系统访问，界面会标注"只读可达"）。
++ (BOOL)probeFilesystemAccess
+{
+    if (ds_probe_write_access()) return YES;
+    if (DSMHAAccessProbePasses()) return YES;
+    if (DSSignatureIsTrollStoreInstalled() && DSFilesystemProbeReadable()) return YES;
+    return NO;
+}
 + (unsigned long long)kernelBase { return (unsigned long long)g_kernel_base; }
 
 /// 本次进程实际走通的是哪条路（供设置页/日志标注「MHA · 零内核」或「内核 + cred 逃逸」）
@@ -358,6 +371,13 @@ static uint32_t ds_cpu_family(void)
     [text appendFormat:@"sandbox: 0x%llx / ext_set: 0x%llx\n",
         DSCredEscapeLastSandbox(), DSCredEscapeLastExtSet()];
     [text appendFormat:@"现场探针写盘: %@\n", ds_probe_write_access() ? @"通过" : @"失败"];
+    [text appendFormat:@"TrollStore 安装: %@\n",
+        DSSignatureIsTrollStoreInstalled()
+            ? [NSString stringWithFormat:@"是（%@）", DSSignatureTrollStoreEvidence()]
+            : @"否"];
+    [text appendFormat:@"签名标识: %@\n", DSSignatureIdentifier() ?: @"(读取不到)"];
+    // 逐路径 + 真实 errno：越狱/TrollStore 环境下"没能获取权限"时，这一节就是定位依据
+    [text appendString:DSFilesystemAccessReport()];
     ds_maybe_init_xpf();   // 仅在设了 DSFILE_XPF 时才真的初始化 XPF；同时保证上游 XPF 不被链接器丢掉
     if (gLastError) [text appendFormat:@"上一次错误: %@\n", gLastError.localizedDescription];
     return text;
