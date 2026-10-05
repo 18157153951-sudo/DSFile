@@ -110,8 +110,10 @@ struct EnvironmentInfo {
                 + "或者本机是 roothide 的沙盒化安装（roothide 下 App 默认仍受沙盒限制）。"
         }
         if flavor == .roothide {
-            return "检测到 roothide，但本 App 读不到系统路径：roothide 下普通 App 仍然受沙盒限制，"
-                + "需要以越狱 App 方式安装（带沙盒例外），或改用内核逃逸激活。"
+            return "检测到 roothide，但本 App 仍受沙盒限制 —— TrollStore 安装的 App 在 roothide 下"
+                + "**不会**获得越狱权限（roothide 的设计就是让 App 看不到越狱）；"
+                + "请改用越狱版（.deb）安装（Sileo / Zebra，装进 <jbroot>/Applications/），"
+                + "或把「访问路径」改成「自动」/「仅内核」走内核那条。"
         }
         if flavor.isJailbroken {
             return "检测到越狱特征，但本 App 读不到系统路径：说明本 App 没有被授予沙盒例外，"
@@ -294,6 +296,16 @@ enum EnvironmentProbe {
             }
         }
 
+        // 5.5) 越狱模式模块的 jbroot 解析：roothide 会让沙盒内的 App 通过**自己容器里的
+        //      `.jbroot-*` 标记**找到越狱根，这是沙盒内唯一可靠的办法（路径探测多半看不见）。
+        if info.jailbreakRoot == nil, let root = DSJailbreakRootPath(), root != "/var/jb" {
+            if !info.flavor.isJailbroken { info.flavor = .roothide }
+            info.jailbreakRoot = root
+            notes.append("jbroot（越狱模式解析）：\(root) ✓")
+        } else if info.jailbreakRoot == nil {
+            notes.append("jbroot（越狱模式解析）：没有解析到越狱根")
+        }
+
         // sh 路径：越狱根优先
         info.shellPath = resolveShell(info: info)
 
@@ -381,7 +393,9 @@ enum EnvironmentProbe {
         let roots = ["/var/containers/Bundle/Application", "/", "/var/mobile"]
         for root in roots {
             guard let names = try? fm.contentsOfDirectory(atPath: root) else { continue }
-            if let hit = names.first(where: { $0.hasPrefix(".jbroot-") }) {
+            // roothide 官方文档：dpkg 会在每个含 Mach-O 的目录里生成 `.jbroot` 符号链接指向越狱根；
+            // 实现里也见过 `.jbroot-<随机后缀>`，所以两种都认。
+            if let hit = names.first(where: { $0 == ".jbroot" || $0.hasPrefix(".jbroot-") }) {
                 let prefix = root == "/" ? "/" + hit : root + "/" + hit
                 if fm.fileExists(atPath: prefix + "/usr") || fm.fileExists(atPath: prefix + "/bin") {
                     return prefix

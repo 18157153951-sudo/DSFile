@@ -43,6 +43,14 @@ FOUNDATION_EXPORT BOOL DSSignatureIsTrollStoreInstalled(void);
 /// TrollStore 判定的依据（一句话，给日志/界面用；不是 TrollStore 时返回 nil）
 FOUNDATION_EXPORT NSString * _Nullable DSSignatureTrollStoreEvidence(void);
 
+/// 读一条本 App 自己的 entitlement（值统一转成字符串；没有该键返回 nil）。
+/// 用途：判断越狱环境里「权限没给」还是「沙盒在拦」——例如
+/// platform-application / com.apple.private.security.container-required。
+FOUNDATION_EXPORT NSString * _Nullable DSSignatureEntitlementValue(NSString *key);
+
+/// 越狱相关 entitlements 的逐条诊断（多行，给日志 / 设置页）
+FOUNDATION_EXPORT NSString *DSSignatureEntitlementDiagnosticReport(void);
+
 /// 多行诊断报告（用于写日志）：签名标识 / TeamIdentifier / application-identifier / 结论
 FOUNDATION_EXPORT NSString *DSSignatureDiagnosticReport(void);
 

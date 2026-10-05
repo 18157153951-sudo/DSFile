@@ -96,22 +96,25 @@ NSString * const DSKernelPathModeDefaultsKey = @"myfilza.pathMode";
 NSString * const DSKernelPathModeValueAuto   = @"auto";
 NSString * const DSKernelPathModeValueMHA    = @"mha";
 NSString * const DSKernelPathModeValueKernel = @"kernel";
+NSString * const DSKernelPathModeValueJailbreak = @"jailbreak";
 
 DSKernelPathMode DSKernelPathModeCurrent(void)
 {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:DSKernelPathModeDefaultsKey];
-    if ([v isEqualToString:DSKernelPathModeValueMHA])    return DSKernelPathModeMHAOnly;
-    if ([v isEqualToString:DSKernelPathModeValueKernel]) return DSKernelPathModeKernelOnly;
+    if ([v isEqualToString:DSKernelPathModeValueMHA])       return DSKernelPathModeMHAOnly;
+    if ([v isEqualToString:DSKernelPathModeValueKernel])    return DSKernelPathModeKernelOnly;
+    if ([v isEqualToString:DSKernelPathModeValueJailbreak]) return DSKernelPathModeJailbreakOnly;
     return DSKernelPathModeAuto;   // 没设置过 / 值非法 = 自动
 }
 
 NSString *DSKernelPathModeDisplayName(DSKernelPathMode mode)
 {
     switch (mode) {
-        case DSKernelPathModeMHAOnly:    return @"仅 MHA（零内核）";
-        case DSKernelPathModeKernelOnly: return @"仅内核（FilzaJailedDS）";
+        case DSKernelPathModeMHAOnly:       return @"仅 MHA（零内核）";
+        case DSKernelPathModeKernelOnly:    return @"仅内核（FilzaJailedDS）";
+        case DSKernelPathModeJailbreakOnly: return @"仅越狱（直接 POSIX，不跑漏洞）";
         case DSKernelPathModeAuto:
-        default:                         return @"自动（推荐）";
+        default:                            return @"自动（推荐）";
     }
 }
 

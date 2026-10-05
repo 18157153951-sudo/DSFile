@@ -43,11 +43,20 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.8.1"
+    private static let appVersion = "0.9.0"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.9.0", date: "2026-10-05", items: [
+            "**新增「越狱模式」（设置 → 访问路径 第四项：仅越狱）**：**完全不执行任何内核漏洞**，直接用越狱环境给的 POSIX 权限 —— 越狱 App（装进 `<jbroot>/Applications/`，带 `platform-application` 沙盒例外）本来就没有沙盒，根本不需要跑漏洞",
+            "**jbroot 解析按 roothide 的真实做法**（逐条尝试、每条都记结果）：① `getenv(\"JBROOT\")` / `getenv(\"ROOTHIDE\")`；② **本 App 自己容器 / 包体内的 `.jbroot-*` 标记**（roothide 就是靠它让沙盒内的 App 找到越狱根，符号链接会自动解析并校验 `<root>/usr`、`<root>/bin`）；③ `/var/mobile/Library/roothide` 与可见的 `.jbroot-*`；④ `/var/jb`（rootless）",
+            "**新增 entitlements 诊断（决定性）**：把本 App 自己的 `platform-application`、`com.apple.private.security.container-required`、`no-sandbox`、`get-task-allow`、`task_for_pid-allow`、`application-identifier`、`com.apple.developer.team-identifier` 逐条打进日志与设置页 —— 一眼区分「权限没给」还是「越狱环境在拦」",
+            "**「仅越狱」失败时明确说明原因、绝不回退内核**：`检测到 TrollStore 安装，但本 App 仍读不到系统路径 —— roothide 下 TrollStore 安装的 App 不会获得越狱权限；请改用越狱版（.deb）安装，或把访问路径改成「自动」/「仅内核」`",
+            "**「自动」也会先试越狱模式**：检测到越狱 / TrollStore 特征（签名里的 `TROLLTROLL`、`JBROOT` / `ROOTHIDE`、越狱库、`.jbroot-*`）时先走越狱路径，成功即采用；失败**不阻断**，继续按「自动」走 MHA / 内核（未越狱的设备行为完全不变）",
+            "**新增越狱版 `.deb`**：CI 产出 `myfilza_0.9.0_iphoneos-arm64.deb`（用 `ldid` 注入 `platform-application` / `container-required=false` / `no-sandbox` / `get-task-allow` 后按 rootless/roothide 规范打包），用 **Sileo / Zebra** 安装即装进 `<jbroot>/Applications/`，装完就带沙盒例外 —— 这是 roothide 上唯一能让 App 真正读写全盘的方式",
+            "**诊断进入设置页「环境 → 探测细节」**：越狱信号、jbroot 逐条解析、entitlements 清单、逐路径 errno 全部可展开查看，点「自检」写进日志"
+        ]),
         ChangeEntry(version: "0.8.1", date: "2026-10-04", items: [
             "**越狱环境探测重做**（真机：iPad13,4 / iOS 16.4.1 / roothide + TrollStore 上报「没能正常获取权限」）：TrollStore 现在用**签名信息**判定 —— `TeamIdentifier == TROLLTROLL` 或 `application-identifier` 以 `TROLLTROLL.` 开头（这条路**不需要任何权限**，真机日志已证明可读）",
             "**roothide 多信号识别**：路径（`/var/mobile/Library/roothide`、`.jbroot-*`）+ 环境变量（`JBROOT` / `ROOTHIDE` / `DYLD_INSERT_LIBRARIES`）+ 越狱库（`libroothide` / `libsubstitute` / `libsubstrate`，只 `dlopen` 不调用）+ LaunchServices 列表里的越狱相关 App（roothide / TrollStore / bootstrap / Sileo…）",
@@ -263,7 +272,7 @@ struct SettingsView: View {
                     .foregroundColor(.orange)
             }
 
-            DisclosureGroup("探测细节（越狱信号 / 逐路径 errno）") {
+            DisclosureGroup("探测细节（越狱信号 / jbroot / entitlements / 逐路径 errno）") {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(notes, id: \.self) { note in
                         Text(note)
@@ -277,6 +286,17 @@ struct SettingsView: View {
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    // 越狱模式：jbroot 逐条解析 + 本 App entitlements（判断「权限没给」还是「沙盒在拦」）
+                    Text("—— jbroot 解析 ——")
+                        .font(.caption2).foregroundColor(.secondary)
+                    Text(DSJailbreakRootResolutionReport())
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(DSJailbreakEntitlementReport())
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -322,9 +342,10 @@ struct SettingsView: View {
     /// 与 DSKernelPathModeDefaultsKey 一致；默认 "auto"
     @AppStorage("myfilza.pathMode") private var pathMode: String = "auto"
 
-    private static let pathModeAutoValue   = "auto"
-    private static let pathModeMHAValue    = "mha"
-    private static let pathModeKernelValue = "kernel"
+    private static let pathModeAutoValue      = "auto"
+    private static let pathModeMHAValue       = "mha"
+    private static let pathModeKernelValue    = "kernel"
+    private static let pathModeJailbreakValue = "jailbreak"
 
     private static let mhaBundleID = "com.apple.mobile.MobileHouseArrest"
 
@@ -347,6 +368,39 @@ struct SettingsView: View {
         }
     }
 
+    /// 越狱模式的真实状态（不猜：签名/环境特征 + jbroot 解析结果 + 真实探针）
+    private var jailbreakStateText: String {
+        let looksJB = DSJailbreakLooksJailbroken()
+        let root = DSJailbreakRootPath() ?? "(未解析到)"
+        let readable = DSFilesystemProbeReadable()
+        let writable = DSFilesystemProbeWritable()
+
+        var access = "不可达"
+        if writable {
+            access = "可写"
+        } else if readable {
+            access = "只读可达"
+        }
+
+        var head = "越狱模式：特征=" + (looksJB ? "有" : "无")
+        head += "，jbroot=" + root
+        head += "，沙盒外=" + access
+
+        var tail = ""
+        if writable || readable {
+            tail = "→ 越狱路径可用（不需要内核漏洞）。"
+        } else if DSSignatureIsTrollStoreInstalled() {
+            tail = "→ 检测到 TrollStore 安装但读不到系统路径：roothide 下 TrollStore 安装的 App "
+                 + "**不会**获得越狱权限。请用 Sileo / Zebra 安装越狱版（.deb，装进 <jbroot>/Applications/），"
+                 + "或把访问路径改成「自动」/「仅内核」。"
+        } else if looksJB {
+            tail = "→ 有越狱特征但本 App 没有沙盒例外：请用越狱版（.deb）安装，或改用「自动」/「仅内核」。"
+        } else {
+            tail = "→ 没有检测到越狱特征；本机请用「自动」或「仅内核」。"
+        }
+        return head + " " + tail
+    }
+
     private var backendSection: some View {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let major = v.majorVersion, minor = v.minorVersion, patch = v.patchVersion
@@ -367,8 +421,9 @@ struct SettingsView: View {
             // ---- 访问路径：用户自己切换，手动优先，绝不被"自动回退"覆盖 ----
             Picker("访问路径", selection: $pathMode) {
                 Text("自动（推荐）").tag(Self.pathModeAutoValue)
-                Text("仅 MHA（零内核）").tag(Self.pathModeMHAValue)
+                Text("仅 MHA").tag(Self.pathModeMHAValue)
                 Text("仅内核").tag(Self.pathModeKernelValue)
+                Text("仅越狱").tag(Self.pathModeJailbreakValue)
             }
             .pickerStyle(.segmented)
 
@@ -379,13 +434,19 @@ struct SettingsView: View {
                          + "不可用时（签名 identifier 不是 MHA / 拿不到别人的容器）会**明确失败并说明原因**，"
                          + "**绝不静默回退内核**。")
                 case Self.pathModeKernelValue:
-                    Text("只走内核：完全跳过 MHA（连检测都不做），直接走下面选定的内核后端 —— "
+                    Text("只走内核：完全跳过越狱模式与 MHA（连检测都不做），直接走下面选定的内核后端 —— "
                          + "默认 FilzaJailedDS，行为与 0.6.2 一致。")
+                case Self.pathModeJailbreakValue:
+                    Text("只走越狱（零漏洞）：**完全不执行任何内核漏洞**，直接用越狱环境给的 POSIX 权限"
+                         + "（越狱 App 装进 <jbroot>/Applications/ 本来就没有沙盒）。"
+                         + "不可用时**明确失败并说明是「权限没给」还是「没有越狱特征」**，不回退内核。")
                 default:
-                    Text("自动（推荐）：MHA 真的可用（签名 identifier 就是 MHA，且能读到别人的容器）才用它；"
-                         + "否则自动回退到你下面选的内核后端。")
+                    Text("自动（推荐）：检测到越狱 / TrollStore 特征时先试越狱模式（不跑漏洞）；"
+                         + "否则 MHA 真的可用才用它；都不行自动回退到你下面选的内核后端。")
                 }
                 Text(mhaIdentityStateText)
+                    .foregroundColor(.secondary)
+                Text(jailbreakStateText)
                     .foregroundColor(.secondary)
                 if let active = DSKernel.activePathDescription() {
                     Label("当前生效路径：\(active)", systemImage: "checkmark.seal.fill")

@@ -11,3 +11,4 @@
 #import "DSSignatureInfo.h"
 #import "DSAppListBridge.h"
 #import "DSFSAccessProbe.h"
+#import "DSJailbreakEnv.h"

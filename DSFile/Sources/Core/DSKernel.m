@@ -43,6 +43,7 @@
 #import "DSMHAKernel.h"               // MHA 身份（零内核）：MCM 容器租约，只在 bundle id 就是 MHA 时尝试
 #import "DSSignatureInfo.h"           // 签名标识 / TeamIdentifier / TrollStore 判定
 #import "DSFSAccessProbe.h"           // 逐路径 + 真实 errno 的文件访问探针
+#import "DSJailbreakEnv.h"            // 越狱模式：jbroot 解析 + entitlements 诊断（不跑任何漏洞）
 #import "patchfinder.h"                // init_xpf（保留上游 XPF 能力，见下）
 #import "machine_info.h"               // CPU 家族宏
 
@@ -105,6 +106,8 @@ static BOOL gEscaped        = NO;
 static NSString *gActivePath = nil;
 /// 最近一次 MHA 路径失败的原因（供「仅 MHA」模式如实报错，不静默回退）
 static NSString *gLastMHAFailureReason = nil;
+/// 最近一次越狱模式失败的原因（供「仅越狱」模式如实报错，不静默回退）
+static NSString *gLastJailbreakFailureReason = nil;
 
 NSString * _Nullable DSKernelActivePathDescription(void) { return gActivePath; }
 static NSError *gLastError  = nil;
@@ -342,6 +345,8 @@ static uint32_t ds_cpu_family(void)
     if (ds_probe_write_access()) return YES;
     if (DSMHAAccessProbePasses()) return YES;
     if (DSSignatureIsTrollStoreInstalled() && DSFilesystemProbeReadable()) return YES;
+    // 越狱模式：越狱 App（装进 <jbroot>/Applications/）本来就没有沙盒，沙盒外只读可达也算有访问
+    if (DSJailbreakLooksJailbroken() && DSFilesystemProbeReadable()) return YES;
     return NO;
 }
 + (unsigned long long)kernelBase { return (unsigned long long)g_kernel_base; }
@@ -376,6 +381,10 @@ static uint32_t ds_cpu_family(void)
             ? [NSString stringWithFormat:@"是（%@）", DSSignatureTrollStoreEvidence()]
             : @"否"];
     [text appendFormat:@"签名标识: %@\n", DSSignatureIdentifier() ?: @"(读取不到)"];
+    // 越狱模式相关：jbroot 解析 + 本 App entitlements（判断"权限没给"还是"沙盒在拦"的决定性依据）
+    [text appendFormat:@"越狱特征: %@\n", DSJailbreakLooksJailbroken() ? @"有" : @"无"];
+    [text appendFormat:@"jbroot: %@\n", DSJailbreakRootPath() ?: @"(未解析到)"];
+    [text appendString:DSJailbreakEntitlementReport()];
     // 逐路径 + 真实 errno：越狱/TrollStore 环境下"没能获取权限"时，这一节就是定位依据
     [text appendString:DSFilesystemAccessReport()];
     ds_maybe_init_xpf();   // 仅在设了 DSFILE_XPF 时才真的初始化 XPF；同时保证上游 XPF 不被链接器丢掉
@@ -472,6 +481,69 @@ static uint32_t ds_cpu_family(void)
     return DSKernelResultExploitFailed;
 }
 
+/// 越狱模式（roothide / rootless / 经典越狱）：**完全不执行任何漏洞**。
+///
+/// 越狱 App（装进 <jbroot>/Applications/，带 platform-application 沙盒例外）本来就能
+/// 直接用 POSIX 读写系统路径，根本不需要内核漏洞；而 roothide 下 TrollStore 安装的
+/// App **仍然受沙盒限制**，这时本路径会如实失败并说明"是权限没给，不是我们没做对"。
+///
+/// 只做三件事：解析 jbroot（逐条记结果）→ 打印本 App entitlements → 逐路径 errno 探针。
++ (DSKernelResult)ds_activateJailbreakWithLog:(DSKernelLogBlock)log
+{
+    if (gEscaped) {
+        if (log) log(@"[myfilza] 本进程已具备沙盒外访问，跳过越狱模式");
+        return DSKernelResultAlreadyActive;
+    }
+
+    if (log) {
+        log(@"[myfilza] 越狱模式：**不执行任何漏洞**，直接用越狱环境给的 POSIX 权限");
+        log([NSString stringWithFormat:@"[myfilza] %@", DSJailbreakEnvironmentSummaryLine()]);
+    }
+
+    // 决定性诊断 1：jbroot 到底解析到哪儿了（逐条尝试 + 结果）
+    for (NSString *line in [DSJailbreakRootResolutionReport() componentsSeparatedByString:@"\n"]) {
+        if (line.length && log) log([NSString stringWithFormat:@"[越狱诊断] %@", line]);
+    }
+    // 决定性诊断 2：本 App 自己的 entitlements —— 一眼看出「权限没给」还是「沙盒在拦」
+    for (NSString *line in [DSJailbreakEntitlementReport() componentsSeparatedByString:@"\n"]) {
+        if (line.length && log) log([NSString stringWithFormat:@"[越狱诊断] %@", line]);
+    }
+
+    NSString *detail = nil;
+    int ret = 1031;
+    @try {
+        ret = DSJailbreakActivate(&detail);
+    } @catch (NSException *e) {
+        detail = [NSString stringWithFormat:@"越狱模式抛出异常：%@", e.reason];
+        ret = 1031;
+    }
+    ds_breadcrumb_write("[myfilza] 越狱模式返回 %d（阶段：%s）\n", ret, DSJailbreakLastStage().UTF8String);
+
+    if (ret == 0) {
+        BOOL writable = ds_probe_write_access();
+        BOOL readable = DSFilesystemProbeReadable();
+        gEscaped = writable || readable;
+        if (log) log([NSString stringWithFormat:@"[myfilza] %@", detail ?: @"越狱模式完成"]);
+        if (gEscaped) {
+            gActivePath = writable ? @"越狱 · 直接 POSIX（可读写）" : @"越狱 · 直接 POSIX（只读可达）";
+            if (log) log([NSString stringWithFormat:
+                          @"[myfilza] *** 已具备沙盒外访问（越狱模式 · 零漏洞）：%@ ***",
+                          writable ? @"可直接读写系统路径" : @"沙盒外只读可达（能浏览/导出，写入仍受限）"]);
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"myfilza.fileSystemAccessChanged" object:nil];
+            return DSKernelResultOK;
+        }
+        // 理论上到不了这里（DSJailbreakActivate 只有在 readable/writable 时才返回 0）
+        gLastJailbreakFailureReason = @"越狱模式报告成功，但探针没通过";
+        if (log) log(@"[myfilza] 越狱模式自检与探针不一致：按失败处理（不做美化）");
+        return DSKernelResultEscapeFailed;
+    }
+
+    gLastJailbreakFailureReason = detail ?: @"未提供原因";
+    if (log) log([NSString stringWithFormat:@"[myfilza] 越狱模式未成功（阶段：%@）：%@",
+                  DSJailbreakLastStage(), detail ?: @"未提供原因"]);
+    return DSKernelResultEscapeFailed;
+}
+
 /// MHA 身份路径（零内核）：只有本 App 的 bundle id 就是
 /// `com.apple.mobile.MobileHouseArrest` 时才尝试。它走 MCM 容器租约
 /// （枚举容器标识 → 逐个取租约并激活 → 真实探针），**完全不执行内核代码**。
@@ -539,19 +611,55 @@ static uint32_t ds_cpu_family(void)
     @try {
         if (log) ds_capture_start(log);
 
-        // === 分派点 1：访问路径（用户可选：自动 / 仅 MHA / 仅内核）===
-        //   Auto       —— MHA 可用才用 MHA，否则自动回退所选内核后端；
-        //   MHAOnly    —— 只走 MHA，不可用就**明确失败**，绝不静默回退内核；
-        //   KernelOnly —— 完全跳过 MHA（连检测/尝试都不做），直接走内核后端。
+        // === 分派点 1：访问路径（用户可选：自动 / 仅 MHA / 仅内核 / 仅越狱）===
+        //   Auto          —— 检测到越狱/TrollStore 特征先试越狱模式；否则 MHA 可用才用 MHA；都不行回退所选内核后端；
+        //   MHAOnly       —— 只走 MHA，不可用就**明确失败**，绝不静默回退内核；
+        //   KernelOnly    —— 完全跳过越狱模式与 MHA（连检测/尝试都不做），直接走内核后端；
+        //   JailbreakOnly —— 只走越狱模式（**零漏洞**），失败也**明确失败**，不回退内核。
         DSKernelPathMode pathMode = DSKernelPathModeCurrent();
         if (log) log([NSString stringWithFormat:@"[myfilza] 访问路径选择：%@",
                       DSKernelPathModeDisplayName(pathMode)]);
 
+        // === 分派点 0：越狱模式（**完全不执行任何漏洞**，直接用越狱环境给的 POSIX 权限）===
+        //   JailbreakOnly —— 只走越狱路径；失败就**明确失败**（说明是"权限没给"还是"没有越狱特征"），不回退内核；
+        //   Auto          —— 检测到越狱/TrollStore 特征时先试越狱路径（成功即采用；失败不阻断，继续原有分派）。
+        if (pathMode == DSKernelPathModeJailbreakOnly) {
+            DSKernelResult jb = [self ds_activateJailbreakWithLog:log];
+            if (jb == DSKernelResultOK || jb == DSKernelResultAlreadyActive) {
+                result = jb;
+            } else {
+                if (log) {
+                    log([NSString stringWithFormat:@"[myfilza] 「仅越狱（直接 POSIX）」失败（阶段：%@）：%@",
+                         DSJailbreakLastStage(), gLastJailbreakFailureReason ?: @"未提供原因"]);
+                    log(@"[myfilza] 按你的选择**不回退内核**。要让越狱模式生效：请用 Sileo / Zebra 安装"
+                          "越狱版（.deb，会装进 <jbroot>/Applications/，带 platform-application 沙盒例外）；"
+                          "或者把访问路径改成「自动（推荐）」/「仅内核」。");
+                }
+                gLastError = [NSError errorWithDomain:@"myfilza"
+                                                 code:DSKernelResultEscapeFailed
+                                             userInfo:@{ NSLocalizedDescriptionKey:
+                                                         (gLastJailbreakFailureReason ?: @"仅越狱模式失败：越狱环境没有给出文件访问权限") }];
+                result = DSKernelResultEscapeFailed;
+            }
+        } else {
+        if (pathMode == DSKernelPathModeAuto && DSJailbreakLooksJailbroken()) {
+            if (log) log(@"[myfilza] 「自动」：检测到越狱 / TrollStore 特征 → 先试越狱模式（不跑任何漏洞）");
+            DSKernelResult jb = [self ds_activateJailbreakWithLog:log];
+            if (jb == DSKernelResultOK || jb == DSKernelResultAlreadyActive) {
+                result = jb;
+            } else if (log) {
+                log([NSString stringWithFormat:@"[myfilza] 越狱模式不可用（阶段：%@）：%@ → 继续按「自动」走 MHA / 内核",
+                     DSJailbreakLastStage(), gLastJailbreakFailureReason ?: @"未提供原因"]);
+            }
+        }
+
         DSKernelResult mhaResult = DSKernelResultInternalError;
         BOOL mhaAttempted = NO;
 
-        if (pathMode == DSKernelPathModeKernelOnly) {
-            if (log) log(@"[myfilza] 「仅内核」：完全跳过 MHA 路径（不检测、不尝试），直接走所选内核后端");
+        if (result == DSKernelResultOK || result == DSKernelResultAlreadyActive) {
+            // 越狱模式已经拿到访问，不再往下走
+        } else if (pathMode == DSKernelPathModeKernelOnly) {
+            if (log) log(@"[myfilza] 「仅内核」：完全跳过越狱模式与 MHA 路径（不检测、不尝试），直接走所选内核后端");
         } else if (!DSMHAIsHost()) {
             if (log) log([NSString stringWithFormat:
                           @"[myfilza] MHA 路径不适用：本 App bundle id 是 %@，不是 com.apple.mobile.MobileHouseArrest%@",
@@ -646,6 +754,7 @@ static uint32_t ds_cpu_family(void)
                 result = [self ds_escapeStepWithLog:log];
             }
         }
+        }   // 关闭「非 JailbreakOnly」分支（越狱模式已在上面单独处理）
     } @finally {
         ds_capture_stop();
         @synchronized (self) { gExploitRunning = NO; }
@@ -660,6 +769,9 @@ static uint32_t ds_cpu_family(void)
              (long)result, DSKernelPathModeDisplayName(DSKernelPathModeCurrent())]);
         if (gLastMHAFailureReason.length > 0) {
             log([NSString stringWithFormat:@"[myfilza] MHA 路径失败原因：%@", gLastMHAFailureReason]);
+        }
+        if (gLastJailbreakFailureReason.length > 0) {
+            log([NSString stringWithFormat:@"[myfilza] 越狱模式失败原因：%@", gLastJailbreakFailureReason]);
         }
     }
 

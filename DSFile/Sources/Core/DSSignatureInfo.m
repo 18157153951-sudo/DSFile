@@ -91,6 +91,33 @@ static NSString *ds_entitlement_string(NSString *name)
 
 #pragma mark - TeamIdentifier / application-identifier / TrollStore
 
+/// 公开：读一条本 App 自己的 entitlement（没有该键返回 nil）
+NSString * _Nullable DSSignatureEntitlementValue(NSString *key)
+{
+    if (key.length == 0) return nil;
+    return ds_entitlement_string(key);
+}
+
+/// 越狱相关的 entitlements 清单（逐条：key = 值/(无)）
+NSString *DSSignatureEntitlementDiagnosticReport(void)
+{
+    NSMutableString *out = [NSMutableString string];
+    NSArray<NSString *> *keys = @[
+        @"platform-application",
+        @"com.apple.private.security.container-required",
+        @"com.apple.private.security.no-sandbox",
+        @"get-task-allow",
+        @"task_for_pid-allow",
+        @"application-identifier",
+        @"com.apple.developer.team-identifier",
+    ];
+    for (NSString *key in keys) {
+        NSString *v = DSSignatureEntitlementValue(key);
+        [out appendFormat:@"  · %@ = %@\n", key, v.length ? v : @"(无)"];
+    }
+    return out;
+}
+
 NSString *DSSignatureTeamIdentifier(void)
 {
     static NSString *cached = nil;

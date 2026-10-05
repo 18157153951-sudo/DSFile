@@ -77,15 +77,20 @@ FOUNDATION_EXPORT NSString * const DSKernelPathModeDefaultsKey;    // myfilza.pa
 FOUNDATION_EXPORT NSString * const DSKernelPathModeValueAuto;      // auto
 FOUNDATION_EXPORT NSString * const DSKernelPathModeValueMHA;       // mha
 FOUNDATION_EXPORT NSString * const DSKernelPathModeValueKernel;    // kernel
+FOUNDATION_EXPORT NSString * const DSKernelPathModeValueJailbreak; // jailbreak
 
 /// 用户选择的访问路径。
-///   Auto       —— 默认。MHA 可用（签名 identifier 就是 MHA 且探针通过）才用 MHA；否则自动回退内核。
-///   MHAOnly    —— 只走 MHA（零内核）。不可用时**明确失败**并说明原因，**绝不静默回退内核**。
-///   KernelOnly —— 完全跳过 MHA（连尝试都不做），直接走所选内核后端（默认 FilzaJailedDS，行为与 0.6.2 一致）。
+///   Auto          —— 默认。检测到越狱/TrollStore 特征时先试越狱模式（直接 POSIX）；
+///                    否则 MHA 可用才用 MHA；都不行自动回退内核。
+///   MHAOnly       —— 只走 MHA（零内核）。不可用时**明确失败**并说明原因，**绝不静默回退内核**。
+///   KernelOnly    —— 完全跳过 MHA（连尝试都不做），直接走所选内核后端（默认 FilzaJailedDS，行为与 0.6.2 一致）。
+///   JailbreakOnly —— 只走越狱模式（**完全不执行任何漏洞**，直接用越狱环境给的 POSIX 权限）。
+///                    不可用时**明确失败**并说明是"权限没给"还是"没有越狱特征"，**不回退内核**。
 typedef NS_ENUM(NSInteger, DSKernelPathMode) {
-    DSKernelPathModeAuto       = 0,
-    DSKernelPathModeMHAOnly    = 1,
-    DSKernelPathModeKernelOnly = 2,
+    DSKernelPathModeAuto          = 0,
+    DSKernelPathModeMHAOnly       = 1,
+    DSKernelPathModeKernelOnly    = 2,
+    DSKernelPathModeJailbreakOnly = 3,
 };
 
 /// 读取用户当前选择（默认 Auto；值非法时也按 Auto 处理）
