@@ -65,8 +65,14 @@ final class RecipeRunner {
     private func preflight() -> [String] {
         var problems: [String] = []
 
-        if !DSKernel.isEscaped() {
-            problems.append("尚未激活内核访问：涉及沙盒外路径的操作会失败。请到设置页点「激活」。")
+        // 0.9.5：这里必须是「统一访问判定」，不能用 DSKernel.isEscaped()（那只是内核逃逸标志）。
+        // 越狱版（.deb 装进 <jbroot>/Applications/）、MHA/MCM 租约（26/27 零内核）、
+        // TrollStore 带 platform-application 的只读可达，都不经过内核逃逸 —— 用旧判据会把这些
+        // 已经具备权限的用户误拦在配方/替换之外（0.9.4 真机反馈就是这个）。
+        if !EnvironmentProbe.hasFileSystemAccess() {
+            problems.append("尚未具备沙盒外访问（\(EnvironmentProbe.accessDeniedDiagnosis())）："
+                + "涉及沙盒外路径的操作会失败。请到设置页点「激活」，"
+                + "或改用越狱版安装（.deb）／MHA 身份包。")
         }
 
         let needsTarget = recipe.steps.contains { PlaceholderResolver.usesTarget($0.source) || PlaceholderResolver.usesTarget($0.dest) }

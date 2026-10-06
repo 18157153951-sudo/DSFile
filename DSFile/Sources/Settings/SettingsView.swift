@@ -43,11 +43,19 @@ struct SettingsView: View {
     // MARK: 常量
 
     private static let appName = "myfilza"
-    private static let appVersion = "0.9.4"
+    private static let appVersion = "0.9.5"
     private static let appBuild = "1"
     private static let maxVisibleLogLines = 300
 
     private static let changeLog: [ChangeEntry] = [
+        ChangeEntry(version: "0.9.5", date: "2026-10-05", items: [
+            "**修「越狱设备连激活都进不去」**：激活流程以前先判「系统版本是否在 DarkSword 覆盖范围内」，不在就直接退出 —— 但越狱设备（例如 iOS 16.4.1）**根本不需要漏洞**，于是越狱路径永远轮不到执行。现在把「是否已具备沙盒外访问」的判断放到版本判断**之前**：已有访问就直接标记为可用并**跳过内核漏洞**（既没必要，也避免 panic 风险）",
+            "**修「越狱版/MHA 包已经能用、却被拦下」**：配方（一键替换）、脚本库、替换任务等处的门槛以前只看「内核逃逸标志」`DSKernel.isEscaped()`，于是越狱版（.deb 直读 POSIX）、MHA/MCM 租约（26/27 零内核）、TrollStore 只读可达这些**根本不经过内核**的路径全被误判成「尚未激活内核访问」",
+            "**新增统一访问判定** `DSKernel.hasFileSystemAccess()` / `EnvironmentProbe.hasFileSystemAccess()`：判据全部基于**真实探针** —— ① 现场写沙盒外成功 ② MHA/MCM 容器租约生效 ③ TrollStore 安装且沙盒外只读可达 ④ 越狱环境且沙盒外只读可达；任何一条成立就**不再拦截**",
+            "**失败提示现在会自证状态**：新增 `DSKernel.fileSystemAccessDiagnosis()`，所有「没有权限」的报错都带上「越狱类型 / 本次生效路径 / 内核逃逸 / 沙盒外探针 + `/var/mobile` 的真实 errno」—— 一行就能定位，不用再来回问",
+            "**设置页状态行改名为「沙盒外读写」并显示生效路径**（例如「已具备（越狱 · 直接 POSIX（可读写））」），不再用只反映内核状态的「沙盒逃逸」误导人",
+            "**审计了所有 `isEscaped()` / `isExploitDone()` 调用点**：凡是语义为「能否读写沙盒外」的一律改走统一入口；真正属于内核专用功能的（提权到 root、内核改属主 `setOwner`、内核读写状态展示、激活流程状态机）**保持不动**"
+        ]),
         ChangeEntry(version: "0.9.4", date: "2026-10-05", items: [
             "**越狱版改成「装上即用」**（真机：Sileo 装完桌面没有图标）：安装过程**全自动**，用户不需要任何手动步骤 —— deb 的 `postinst` 与手动包的 `install.sh` 行为完全一致",
             "**自动刷新桌面（respring）**：安装+注册成功后依次尝试 `sbreload` → `killall -9 SpringBoard` → `launchctl kickstart -k system/com.apple.SpringBoard`，执行前打印「即将刷新桌面（图标会立刻出现）」；三种都失败才提示手动刷新 —— 这是「装完没图标」的最后一道自动补救",
@@ -1039,10 +1047,17 @@ struct SettingsView: View {
                                     label: "内核读写",
                                     value: DSKernel.isExploitDone() ? "已拿到（本次运行有效）" : "还没拿到",
                                     monospaced: false))
+        // 0.9.5：这一行显示的是「现在能不能操作沙盒外」，所以用统一访问判定，
+        // 不能只看内核逃逸 —— 越狱版（.deb）/ MHA 身份包根本不经过内核逃逸。
+        let unifiedAccess = EnvironmentProbe.hasFileSystemAccess()
+        let activePath = DSKernel.activePathDescription()
         items.append(DeviceInfoItem(icon: "lock.open.fill",
-                                    tint: DSKernel.isEscaped() ? .green : .secondary,
-                                    label: "沙盒逃逸",
-                                    value: DSKernel.isEscaped() ? "已逃逸，可访问整机文件" : "未逃逸，只能访问自己的沙盒",
+                                    tint: unifiedAccess ? .green : .secondary,
+                                    label: "沙盒外读写",
+                                    value: unifiedAccess
+                                        ? "已具备" + (activePath.map { "（\($0)）" }
+                                                      ?? "（环境本身可达，无需内核）")
+                                        : "不可达，只能访问自己的沙盒",
                                     monospaced: false))
         return items
     }

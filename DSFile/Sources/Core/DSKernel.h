@@ -49,6 +49,26 @@ typedef void (^DSKernelLogBlock)(NSString *line);
 + (BOOL)isRunningAsRoot NS_SWIFT_NAME(isRunningAsRoot());
 /// 不依赖缓存，现场做一次探针写盘
 + (BOOL)probeFilesystemAccess NS_SWIFT_NAME(probeFilesystemAccess());
+
+#pragma mark - 统一访问判定（0.9.5）
+//
+//  isEscaped 只是「内核逃逸标志」，它**不能**代表"现在能不能操作沙盒外文件"：
+//  越狱 App（.deb 装进 <jbroot>/Applications/）、MHA/MCM 租约（26/27 零内核）、
+//  TrollStore 带 platform-application 的只读可达 —— 这些路径都不经过内核逃逸，
+//  用 isEscaped() 当门槛会把已经具备权限的用户误拦（0.9.4 真机就是这个问题）。
+//
+//  所以凡是"能否读写沙盒外"的语义，一律走下面这个统一入口。
+
+/// 统一入口：本进程**现在**能不能操作沙盒外文件。判据全部基于真实探针（不看标志位）：
+///   ① 现场写沙盒外成功（内核逃逸 / 越狱 App 直写）；
+///   ② MHA/MCM 容器租约真的生效（零内核）；
+///   ③ TrollStore 安装且沙盒外**只读**可达；
+///   ④ 越狱环境且沙盒外**只读**可达。
++ (BOOL)hasFileSystemAccess NS_SWIFT_NAME(hasFileSystemAccess());
+
+/// 人话版诊断（越狱类型 / 本次生效路径 / 内核逃逸 / 沙盒外探针 + `/var/mobile` 的真实 errno）。
+/// 失败提示里直接带上它，用户一次上报就能定位，不用来回猜。
++ (NSString *)fileSystemAccessDiagnosis NS_SWIFT_NAME(fileSystemAccessDiagnosis());
 /// 内核基址（0 表示还没拿到）
 + (unsigned long long)kernelBase NS_SWIFT_NAME(kernelBase());
 /// 本次进程**实际走通**的是哪条路，例如「MHA · 零内核」/「内核 + cred 逃逸（FilzaJailedDS）」；

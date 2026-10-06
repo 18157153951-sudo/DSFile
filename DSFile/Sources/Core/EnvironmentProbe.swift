@@ -64,6 +64,10 @@ struct EnvironmentInfo {
     var canWriteOutsideSandbox = false
     /// 内核逃逸是否已就绪（由调用方填，见 refreshKernelState）
     var kernelEscaped = false
+    /// 统一访问探针（`DSKernel.hasFileSystemAccess()`）：内核逃逸 / MHA 租约 / TrollStore 只读 /
+    /// 越狱只读 —— 任一条**真的**成立。这才是"能不能操作沙盒外文件"的权威判据；
+    /// 只看 kernelEscaped 会把越狱版、MHA 身份包的用户误拦（0.9.4 真机问题）。
+    var unifiedAccess = false
     /// 逐路径探针的完整报告（写日志 / 设置页展示）
     var accessReport = ""
     /// 探测时试过的信号与各自结果（一行一条，给日志/设置页）
@@ -71,9 +75,9 @@ struct EnvironmentInfo {
 
     var isRoot: Bool { uid == 0 }
 
-    /// 统一入口：内核逃逸 **或** 环境本身可达沙盒外，二者之一即可做文件操作
+    /// 统一入口：内核逃逸 **或** 环境本身可达沙盒外（越狱 / MHA 租约 / TrollStore 只读），任一即可做文件操作
     var hasFileSystemAccess: Bool {
-        return kernelEscaped || canWriteOutsideSandbox || canReadOutsideSandbox
+        return kernelEscaped || unifiedAccess || canWriteOutsideSandbox || canReadOutsideSandbox
     }
 
     /// 只能读、不能写（界面提示用）
@@ -180,6 +184,9 @@ enum EnvironmentProbe {
         var result = detect()
         // 内核状态每次都现场问一次（很便宜，且逃逸成功要立刻反映出来）
         result.kernelEscaped = DSKernel.isEscaped()
+        // 统一访问判定同样现场问一次：它把 MHA 租约 / TrollStore 只读 / 越狱只读都算进来，
+        // 只靠 kernelEscaped 会漏掉这些零内核路径（0.9.5 修的就是这个）。
+        result.unifiedAccess = DSKernel.hasFileSystemAccess()
         cached = result
         cachedAt = Date()
         logIfChanged(result)
@@ -196,6 +203,12 @@ enum EnvironmentProbe {
     /// 统一入口：能不能操作沙盒外的文件（内核逃逸 或 环境本身可达）
     static func hasFileSystemAccess() -> Bool {
         return info().hasFileSystemAccess
+    }
+
+    /// 失败提示用的一行诊断：越狱类型 / 本次生效路径 / 内核逃逸 / 沙盒外探针 + `/var/mobile` 的真实 errno。
+    /// 所有"没有权限"的报错都带上它 —— 用户回传一行就够定位，不用再来回问。
+    static func accessDeniedDiagnosis() -> String {
+        return DSKernel.fileSystemAccessDiagnosis()
     }
 
     /// 内核状态变了之后刷新一次（激活成功/提权成功时调）

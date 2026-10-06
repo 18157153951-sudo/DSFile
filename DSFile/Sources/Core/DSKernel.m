@@ -349,6 +349,41 @@ static uint32_t ds_cpu_family(void)
     if (DSJailbreakLooksJailbroken() && DSFilesystemProbeReadable()) return YES;
     return NO;
 }
+
+/// 统一入口（0.9.5）：**语义 = 现在能不能操作沙盒外文件**，与 isEscaped（内核逃逸标志）区分开。
+/// 实现就是上面那个"现场探针 + 各条零内核路径"的判定，这里只是给它一个不会再被误用的名字。
++ (BOOL)hasFileSystemAccess { return [self probeFilesystemAccess]; }
+
+/// 人话版诊断：把"为什么没有访问"需要的全部事实压成一行（越狱类型 / 生效路径 / 内核逃逸 / 探针 + errno）。
+/// 失败提示直接带上它，用户回传一行就够定位。
++ (NSString *)fileSystemAccessDiagnosis
+{
+    NSMutableString *text = [NSMutableString string];
+
+    NSString *jb;
+    if (DSJailbreakLooksJailbroken()) {
+        NSString *root = DSJailbreakRootPath();
+        jb = root.length > 0 ? [NSString stringWithFormat:@"有（jbroot=%@）", root] : @"有（未解析到 jbroot）";
+    } else {
+        jb = @"未检测到越狱特征";
+    }
+    [text appendFormat:@"越狱=%@", jb];
+    [text appendFormat:@"、生效路径=%@", gActivePath.length > 0 ? gActivePath : @"无"];
+    [text appendFormat:@"、内核逃逸=%@", gEscaped ? @"是" : @"否"];
+    [text appendFormat:@"、沙盒外探针：可读=%@ 可写=%@",
+        DSFilesystemProbeReadable() ? @"是" : @"否",
+        DSFilesystemProbeWritable() ? @"是" : @"否"];
+
+    // 附上 /var/mobile 那一行的真实 errno（最直观的一条：EPERM=沙盒拒绝 / ENOENT=不存在 / EACCES=权限不足）
+    for (NSString *line in [DSFilesystemAccessReport() componentsSeparatedByString:@"\n"]) {
+        if ([line containsString:@"/var/mobile →"] || [line hasSuffix:@"/var/mobile"]) {
+            [text appendFormat:@"、%@", [line stringByTrimmingCharactersInSet:
+                [NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+            break;
+        }
+    }
+    return text;
+}
 + (unsigned long long)kernelBase { return (unsigned long long)g_kernel_base; }
 
 /// 本次进程实际走通的是哪条路（供设置页/日志标注「MHA · 零内核」或「内核 + cred 逃逸」）

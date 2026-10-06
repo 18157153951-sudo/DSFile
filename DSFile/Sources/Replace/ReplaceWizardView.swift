@@ -1150,7 +1150,8 @@ final class ReplaceWizardModel: ObservableObject {
         }
         guard EnvironmentProbe.hasFileSystemAccess() else {
             needsActivation = true
-            append("还没有沙盒外读写权限：请到「设置」页点『激活内核访问』；越狱 / roothide / TrollStore 环境下可以直接用。", .error)
+            append("还没有沙盒外读写权限：请到「设置」页点『激活内核访问』，或改用越狱版安装（.deb）／MHA 身份包。"
+                + "当前环境：\(EnvironmentProbe.accessDeniedDiagnosis())", .error)
             return
         }
 

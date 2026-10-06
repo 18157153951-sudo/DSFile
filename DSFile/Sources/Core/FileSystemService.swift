@@ -19,7 +19,8 @@ enum FileSystemError: LocalizedError {
             if code == EACCES || code == EPERM {
                 if !EnvironmentProbe.hasFileSystemAccess() {
                     return "无法读取 \(path)（errno \(code)）：需要先激活访问才能读取容器内容 —— "
-                         + "去「设置」页激活，或换成可用的访问路径"
+                         + "去「设置」页激活，或换成可用的访问路径。"
+                         + "当前环境：\(EnvironmentProbe.accessDeniedDiagnosis())"
                 }
                 return "无法读取 \(path)（errno \(code): \(String(cString: strerror(code))))："
                      + "已激活但仍被拒绝，说明该路径不在本次取得的权限范围内"

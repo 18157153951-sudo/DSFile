@@ -97,7 +97,9 @@ final class KernelCenter: ObservableObject {
     func refresh() {
         kernelBase = DSKernel.kernelBase()
         isRoot = DSKernel.isRunningAsRoot()
-        if DSKernel.isEscaped() {
+        // 0.9.5：这里代表"现在能不能操作沙盒外"，所以用统一判定（越狱 / MHA 也算），
+        // 否则越狱版用户会看到"未激活"，而实际上文件功能已经可用。
+        if DSKernel.hasFileSystemAccess() {
             phase = .escaped
         } else if busy {
             phase = .running
@@ -112,7 +114,8 @@ final class KernelCenter: ObservableObject {
 
     func activateIfNeeded() {
         guard autoActivate else { return }
-        guard !DSKernel.isEscaped(), !busy else { return }
+        // 已有沙盒外访问（越狱 / MHA / TrollStore 只读）就不要自动跑漏洞了
+        guard !DSKernel.hasFileSystemAccess(), !busy else { return }
         activate()
     }
 
@@ -121,14 +124,20 @@ final class KernelCenter: ObservableObject {
             DSLog.shared.warn("已经有一次激活在进行中，忽略这次点击（重复执行漏洞极易把设备搞崩）", source: "内核")
             return
         }
+        // 0.9.5：只要**已经**具备沙盒外访问（越狱版直读 POSIX / MHA 租约 / TrollStore 只读），
+        // 就绝不能再去跑内核漏洞 —— 既没必要，也会平白增加 panic 风险。
+        // 这个判断必须放在「系统版本是否在漏洞覆盖范围内」**之前**：
+        // 越狱设备（例如 iOS 16.4.1，本来就不在 DarkSword 覆盖面内）根本不依赖漏洞，
+        // 旧顺序会让它连激活都进不去（真机就是这个问题）。
+        if DSKernel.hasFileSystemAccess() {
+            phase = .escaped
+            DSLog.shared.info("已具备沙盒外访问（\(DSKernel.activePathDescription() ?? "环境本身可达，无需内核")），"
+                + "无需执行内核漏洞", source: "内核")
+            return
+        }
         if !DSKernel.isSystemVersionSupported() {
             phase = .unsupported(DSKernel.supportSummary())
             DSLog.shared.warn(DSKernel.supportSummary(), source: "内核")
-            return
-        }
-        if DSKernel.isEscaped() {
-            phase = .escaped
-            DSLog.shared.info("沙盒已经是逃逸状态，无需重复激活", source: "内核")
             return
         }
 

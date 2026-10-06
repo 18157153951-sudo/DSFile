@@ -399,10 +399,13 @@ enum ReplaceTaskRunner {
             return false
         }
 
-        // 环境门：越狱环境可达 或 内核逃逸成功，否则明确提示，绝不静默、也绝不自动去跑漏洞
+        // 环境门：统一访问判定（内核逃逸 / MHA 租约 / 越狱直读 / TrollStore 只读都算），
+        // 否则明确提示，绝不静默、也绝不自动去跑漏洞
         guard EnvironmentProbe.hasFileSystemAccess() else {
-            DSLog.shared.warn("\(reason)：跳过——现在没有沙盒外读写权限。请到「设置」页点『激活内核访问』（越狱 / roothide / TrollStore 环境可直接用）", source: "替换任务")
-            postDidRun(success: false, summary: "没有沙盒外读写权限，请先激活内核访问")
+            let diag = EnvironmentProbe.accessDeniedDiagnosis()
+            DSLog.shared.warn("\(reason)：跳过——现在没有沙盒外读写权限（\(diag)）。"
+                + "请到「设置」页点『激活内核访问』，或改用越狱版安装（.deb）／MHA 身份包。", source: "替换任务")
+            postDidRun(success: false, summary: "没有沙盒外读写权限（\(diag)），请先激活访问")
             return false
         }
 

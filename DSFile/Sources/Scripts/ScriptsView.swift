@@ -392,10 +392,11 @@ struct ScriptDetailView: View {
                 .truncationMode(.middle)
             }
 
-            if !kernel.phase.isActive {
+            // 0.9.5：横幅判据改成「统一访问判定」——越狱版 / MHA 身份包已经具备权限时不该再提示"尚未激活"。
+            if !EnvironmentProbe.hasFileSystemAccess() {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle").foregroundColor(.orange)
-                    Text("尚未激活内核访问，沙盒外的路径写不进去").font(.caption2).foregroundColor(.secondary)
+                    Text("尚未具备沙盒外访问，沙盒外的路径写不进去").font(.caption2).foregroundColor(.secondary)
                     Spacer(minLength: 0)
                     Button("激活") { kernel.activate() }
                         .font(.caption)
@@ -1048,7 +1049,9 @@ struct AppsPickerView: View {
     private func scan() {
         loading = true
         scanNote = nil
-        let escaped = DSKernel.isEscaped()
+        // 0.9.5：用统一访问判定（内核逃逸 / MHA 租约 / 越狱只读 / TrollStore 只读都算），
+        // 否则越狱版与 MHA 身份包的用户会看到"尚未激活内核访问"的误导提示。
+        let escaped = EnvironmentProbe.hasFileSystemAccess()
         DispatchQueue.global(qos: .userInitiated).async {
             let list = escaped ? AppScanner.installedApps(force: true) : []
             DispatchQueue.main.async {
@@ -1057,7 +1060,9 @@ struct AppsPickerView: View {
                 if list.isEmpty {
                     scanNote = escaped
                         ? "已安装 App 目录是空的，或者系统还没有刷新缓存；可以下拉重试。"
-                        : "尚未激活内核访问，无法读取 /var/containers/Bundle/Application。"
+                        : "尚未具备沙盒外访问（\(EnvironmentProbe.accessDeniedDiagnosis())）："
+                            + "无法读取 /var/containers/Bundle/Application。"
+                            + "请到设置页「激活」，或改用越狱版安装（.deb）。"
                 }
             }
         }

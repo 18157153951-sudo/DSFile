@@ -25,6 +25,7 @@ name: Build Jailbreak Deb
 #     apt.tinyapps.Renet-*.deb）：data 布局为 ./Applications/<Name>.app/...，
 #     Architecture 一律 iphoneos-arm64e，postinst 里会 chown/ldid -s/uicache。
 #
+# 0.9.5：与 App 版本同步（App 侧修「越狱版/MHA 已能用却被拦下」，安装流程无改动）
 # 0.9.4：安装全自动（装上即用）—— postinst 与 install.sh 一致：
 #        定位 jbroot → .jbroot 链接 → chown/chmod → ldid 重签 → 多路 uicache →
 #        **自动 respring（sbreload → killall -9 SpringBoard → launchctl kickstart）** → 打印结论
@@ -50,7 +51,7 @@ permissions:
   contents: read
 
 env:
-  VERSION: 0.9.4
+  VERSION: 0.9.5
 
 jobs:
   deb:
